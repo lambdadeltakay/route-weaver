@@ -106,7 +106,6 @@ impl P2PCommunicator {
         counter.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
-
             counter.tick().await;
         }
     }
@@ -142,6 +141,11 @@ impl P2PCommunicator {
             if let Some(packet) = read.next().await {
                 // Packet decoded ok
                 if let Ok(packet) = packet {
+                    if packet.source == packet.destination {
+                        log::warn!("Packet is set to route back to sender, which was done likely to overload this node. Dropping");
+                        continue;
+                    }
+
                     if packet.destination != self.public_key {
                         log::trace!("Packet is not for us, rerouting to {}", packet.destination);
 
@@ -168,7 +172,6 @@ impl P2PCommunicator {
                             }
                         } else {
                             // We don't have noise for this girl. Handshake now
-
                             log::trace!("Handshake needed from {}", packet.source);
 
                             // First we will try to decrypt this as if it is a Handshake message
