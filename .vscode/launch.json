@@ -1,0 +1,121 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'route-weaver-router'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=route-weaver-router",
+                    "--package=route-weaver-router"
+                ],
+                "filter": {
+                    "name": "route-weaver-router",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'route-weaver-router'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=route-weaver-router",
+                    "--package=route-weaver-router"
+                ],
+                "filter": {
+                    "name": "route-weaver-router",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'route-weaver-bluetooth-transport'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=route-weaver-bluetooth-transport"
+                ],
+                "filter": {
+                    "name": "route-weaver-bluetooth-transport",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'route-weaver-common'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=route-weaver-common"
+                ],
+                "filter": {
+                    "name": "route-weaver-common",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'route-weaver-tcp-transport'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=route-weaver-tcp-transport"
+                ],
+                "filter": {
+                    "name": "route-weaver-tcp-transport",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'route-weaver-unix-transport'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=route-weaver-unix-transport"
+                ],
+                "filter": {
+                    "name": "route-weaver-unix-transport",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

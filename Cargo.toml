@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["router", "common", "plugins/*"]
+
+[workspace.dependencies]
+snow = "0.9"
+log = "0.4"
