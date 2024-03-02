@@ -6,8 +6,8 @@ use route_weaver_common::{
         Transport, TransportAddress, TransportConnectionReadHalf, TransportConnectionWriteHalf,
     },
 };
-use std::net::SocketAddr;
 use std::pin::pin;
+use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{
@@ -16,16 +16,19 @@ use tokio::{
     },
 };
 
+// We use two listeners because operating system like BSD can't do dual stack
 #[derive(Debug)]
 pub struct TcpTransport {
-    socket: TcpListener,
+    socket4: TcpListener,
+    socket6: TcpListener,
 }
 
 #[async_trait::async_trait]
 impl Transport for TcpTransport {
     async fn boxed_new() -> Box<dyn Transport> {
         Box::new(Self {
-            socket: TcpListener::bind("0.0.0.0:3434").await.unwrap(),
+            socket4: TcpListener::bind(("0.0.0.0", 3434)).await.unwrap(),
+            socket6: TcpListener::bind(("::", 3434)).await.unwrap(),
         })
     }
 
@@ -66,26 +69,31 @@ impl Transport for TcpTransport {
         ),
         Option<TransportAddress>,
     )> {
-        self.socket.accept().await.ok().map(|(stream, addr)| {
-            let (read, write) = stream.into_split();
+        // Accept incoming connections on both IPv4 and IPv6 listeners
+        // This assumes that two don't try to connect at the same time. Oops
+        let (stream, addr) = tokio::select! {
+            Ok((stream, addr)) = self.socket4.accept() => (stream, addr),
+            Ok((stream, addr)) = self.socket6.accept() => (stream, addr),
+        };
 
+        let (read, write) = stream.into_split();
+
+        Some((
             (
-                (
-                    TransportConnectionReadFramer::new(
-                        Box::pin(TcpTransportConnectionReadHalf { stream: read }),
-                        PacketEncoderDecoder,
-                    ),
-                    TransportConnectionWriteFramer::new(
-                        Box::pin(TcpTransportConnectionWriteHalf { stream: write }),
-                        PacketEncoderDecoder,
-                    ),
+                TransportConnectionReadFramer::new(
+                    Box::pin(TcpTransportConnectionReadHalf { stream: read }),
+                    PacketEncoderDecoder,
                 ),
-                Some(TransportAddress {
-                    protocol: "tcp",
-                    data: addr.ip().to_string(),
-                }),
-            )
-        })
+                TransportConnectionWriteFramer::new(
+                    Box::pin(TcpTransportConnectionWriteHalf { stream: write }),
+                    PacketEncoderDecoder,
+                ),
+            ),
+            Some(TransportAddress {
+                protocol: "tcp",
+                data: addr.ip().to_string(),
+            }),
+        ))
     }
 }
 
