@@ -6,8 +6,9 @@ use route_weaver_common::{
         Transport, TransportAddress, TransportConnectionReadHalf, TransportConnectionWriteHalf,
     },
 };
+use socket2::Socket;
+use std::net::SocketAddr;
 use std::pin::pin;
-use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{
@@ -19,16 +20,31 @@ use tokio::{
 // We use two listeners because operating system like BSD can't do dual stack
 #[derive(Debug)]
 pub struct TcpTransport {
-    socket4: TcpListener,
-    socket6: TcpListener,
+    socket: TcpListener,
 }
 
 #[async_trait::async_trait]
 impl Transport for TcpTransport {
     async fn boxed_new() -> Box<dyn Transport> {
+        let socket = Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )
+        .unwrap();
+
+        // These options are technically not strictly required
+        let _ = socket.set_only_v6(false);
+        let _ = socket.set_cloexec(true);
+        let _ = socket.set_nonblocking(true);
+
+        socket
+            .bind(&SocketAddr::new("::".parse().unwrap(), 3434).into())
+            .unwrap();
+        socket.listen(1).unwrap();
+
         Box::new(Self {
-            socket4: TcpListener::bind(("0.0.0.0", 3434)).await.unwrap(),
-            socket6: TcpListener::bind(("::", 3434)).await.unwrap(),
+            socket: TcpListener::from_std(std::net::TcpListener::from(socket)).unwrap(),
         })
     }
 
@@ -69,15 +85,8 @@ impl Transport for TcpTransport {
         ),
         Option<TransportAddress>,
     )> {
-        // Accept incoming connections on both IPv4 and IPv6 listeners
-        // This assumes that two don't try to connect at the same time. Oops
-        let (stream, addr) = tokio::select! {
-            Ok((stream, addr)) = self.socket4.accept() => (stream, addr),
-            Ok((stream, addr)) = self.socket6.accept() => (stream, addr),
-        };
-
+        let stream = self.socket.accept().await.map(|(stream, _)| stream).ok()?;
         let (read, write) = stream.into_split();
-
         Some((
             (
                 TransportConnectionReadFramer::new(
@@ -89,10 +98,7 @@ impl Transport for TcpTransport {
                     PacketEncoderDecoder,
                 ),
             ),
-            Some(TransportAddress {
-                protocol: "tcp",
-                data: addr.ip().to_string(),
-            }),
+            None,
         ))
     }
 }
