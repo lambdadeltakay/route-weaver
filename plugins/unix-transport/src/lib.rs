@@ -25,10 +25,13 @@ pub struct UnixTransport {
 #[async_trait::async_trait]
 impl Transport for UnixTransport {
     async fn boxed_new() -> Box<dyn Transport> {
-        let _ = remove_file("/tmp/route-weaver-unix-transport").await;
+        let tmpdir = std::env::temp_dir();
+        let socket_path = tmpdir.join("route-weaver-unix-transport");
+
+        let _ = remove_file(socket_path.clone()).await;
 
         Box::new(Self {
-            socket: UnixListener::bind("/tmp/route-weaver-unix-transport").unwrap(),
+            socket: UnixListener::bind(socket_path).unwrap(),
         })
     }
 
