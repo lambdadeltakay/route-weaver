@@ -23,7 +23,7 @@ impl From<&str> for ApplicationId {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum Message {
+pub enum PeerToPeerMessage {
     /// Only valid message for handshakes before encryption except for the next one
     /// Valid response messages: Handshake
     Handshake,
@@ -63,13 +63,12 @@ pub enum Message {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
 /// What sort of pre encryption transformation we used
 /// This also inadvertantly creates a magic byte for the packet filtering out a lot of totally random messages
 pub enum PreEncryptionTransformation {
     Plain,
     Lz4,
-    Zlib,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash)]
@@ -87,7 +86,9 @@ pub const MAX_NOISE_MESSAGE_LENGTH: usize = u16::MAX as usize - 128;
 pub const SERIALIZED_PACKET_SIZE_MAX: usize = (size_of::<PublicKey>() * 2) + u16::MAX as usize * 2;
 
 #[derive(Default, Debug)]
-pub struct PacketEncoderDecoder;
+pub struct PacketEncoderDecoder {
+    working_buffer: Vec<u8>,
+}
 
 impl Decoder for PacketEncoderDecoder {
     type Item = RouteWeaverPacket;
@@ -118,9 +119,8 @@ impl Decoder for PacketEncoderDecoder {
                 if src.len() > SERIALIZED_PACKET_SIZE_MAX {
                     log::error!("Data hit the max buffer size without being deserializable, couldn't possibly be a packet");
 
-                    // We don't return an error so the stream is not terminated
-                    // Instead discard the buffer and try again
-                    src.advance(src.remaining().min(SERIALIZED_PACKET_SIZE_MAX));
+                    // Drop the rest of the buffer
+                    src.clear();
                     Ok(None)
                 } else {
                     // Packet could be valid but it just hasn't had enough coming in to be deserializable yet
@@ -139,8 +139,9 @@ impl Encoder<RouteWeaverPacket> for PacketEncoderDecoder {
         item: RouteWeaverPacket,
         dst: &mut tokio_util::bytes::BytesMut,
     ) -> Result<(), Self::Error> {
-        let buffer = wire_encode(&item)?;
-        dst.extend(&buffer);
+        self.working_buffer.fill(0);
+        let len = wire_encode(&mut self.working_buffer, &item)?;
+        dst.extend_from_slice(&self.working_buffer[..len]);
 
         Ok(())
     }

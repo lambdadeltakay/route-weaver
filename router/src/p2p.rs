@@ -5,16 +5,25 @@ use ringbuf::StaticRb;
 use route_weaver_common::{
     address::TransportAddress,
     message::{
-        Message, PacketEncoderDecoder, RouteWeaverPacket, TransportConnectionReadFramer,
+        PacketEncoderDecoder, PeerToPeerMessage, RouteWeaverPacket, TransportConnectionReadFramer,
         TransportConnectionWriteFramer,
     },
     noise::{Noise, PrivateKey, PublicKey},
     transport::Transport,
 };
-use std::{collections::HashMap, num::NonZeroUsize, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    num::NonZeroUsize,
+    pin::Pin,
+    sync::{atomic::AtomicUsize, Arc},
+    time::Duration,
+};
 use tokio::{
     io::split,
-    sync::{Mutex, RwLock},
+    sync::{
+        mpsc::{channel, Sender},
+        Mutex, RwLock,
+    },
     time::{interval, sleep, timeout, MissedTickBehavior},
 };
 
@@ -51,17 +60,38 @@ impl P2PCommunicatorBuilder {
     }
 
     pub async fn build(mut self) -> Arc<P2PCommunicator> {
+        assert!(!self.transports.is_empty());
+
         let communicator = Arc::new(P2PCommunicator {
+            ticket_counter: Mutex::new(0),
             public_key: self.public_key.unwrap(),
             private_key: self.private_key.unwrap(),
-            out_writers: RwLock::new(Vec::new()),
             inbox: RwLock::new(LruCache::new(NonZeroUsize::new(100).unwrap())),
+            outbox: RwLock::new(LruCache::new(NonZeroUsize::new(1000).unwrap())),
+            remote_packet_outbox: RwLock::new(LruCache::new(NonZeroUsize::new(10).unwrap())),
+            writers: RwLock::new(LruCache::new(
+                NonZeroUsize::new(self.transports.len()).unwrap(),
+            )),
             noise_cache: RwLock::new(LruCache::new(NonZeroUsize::new(100).unwrap())),
         });
 
         if let Some(seed_node) = self.seed_node {
             tokio::spawn(communicator.clone().keep_up_with_seed_nodes(seed_node));
         }
+
+        let me = communicator.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let outbox_lock = me.outbox.write().await;
+                if outbox_lock.is_empty() {
+                    sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
+
+                let mut writers_lock = me.writers.write().await;
+            }
+        });
 
         for (transport_name, transport) in self.transports.drain() {
             let me = communicator.clone();
@@ -72,8 +102,14 @@ impl P2PCommunicatorBuilder {
                     if let Some((transport, address)) = transport.accept().await {
                         let (read, write) = split(transport);
                         let (read, write) = (
-                            TransportConnectionReadFramer::new(read, PacketEncoderDecoder),
-                            TransportConnectionWriteFramer::new(write, PacketEncoderDecoder),
+                            TransportConnectionReadFramer::new(
+                                read,
+                                PacketEncoderDecoder::default(),
+                            ),
+                            TransportConnectionWriteFramer::new(
+                                write,
+                                PacketEncoderDecoder::default(),
+                            ),
                         );
 
                         // FIXME: We should not store transports that can't produce addresses
@@ -86,11 +122,16 @@ impl P2PCommunicatorBuilder {
 
                         log::trace!("Accepted connection from {}", gateway_address);
 
-                        me.out_writers.write().await.push(Mutex::new(write));
+                        me.writers
+                            .write()
+                            .await
+                            .get_or_insert_mut(transport_name, Vec::default)
+                            .push(write);
 
-                        let me = me.clone();
-
-                        tokio::spawn(me.create_gateway_listener(read, gateway_address.clone()));
+                        tokio::spawn(
+                            me.clone()
+                                .create_gateway_listener(read, gateway_address.clone()),
+                        );
                     }
                 }
             });
@@ -101,10 +142,13 @@ impl P2PCommunicatorBuilder {
 }
 
 pub struct P2PCommunicator {
+    ticket_counter: Mutex<u16>,
     public_key: PublicKey,
     private_key: PrivateKey,
-    out_writers: RwLock<Vec<Mutex<TransportConnectionWriteFramer>>>,
-    inbox: RwLock<LruCache<PublicKey, StaticRb<Message, 1000>>>,
+    inbox: RwLock<LruCache<PublicKey, StaticRb<PeerToPeerMessage, 1000>>>,
+    outbox: RwLock<LruCache<u16, (PeerToPeerMessage, PublicKey)>>,
+    remote_packet_outbox: RwLock<LruCache<PublicKey, RouteWeaverPacket>>,
+    writers: RwLock<LruCache<&'static str, Vec<TransportConnectionWriteFramer>>>,
     noise_cache: RwLock<LruCache<PublicKey, Noise>>,
 }
 
@@ -115,28 +159,6 @@ impl P2PCommunicator {
 
         loop {
             counter.tick().await;
-        }
-    }
-
-    async fn route_packet_from_remote(self: Arc<Self>, packet: RouteWeaverPacket) {
-        match timeout(
-            Duration::from_millis(100),
-            self.route_packet(packet.clone()),
-        )
-        .await
-        {
-            Ok(_) => {
-                log::trace!(
-                    "Packet that was requested to be routed by remote node {} successfully",
-                    packet.destination
-                );
-            }
-            Err(_) => {
-                log::warn!(
-                    "Packet that was requested to be routed by remote node {} failed to route",
-                    packet.destination
-                );
-            }
         }
     }
 
@@ -158,8 +180,11 @@ impl P2PCommunicator {
                         log::trace!("Packet is not for us, rerouting to {}", packet.destination);
 
                         // Nodes have no actual obligation to do routing so if routing fails we just drop the packet
-                        // TODO: Add rate limiting or something because this is a very easy memory exhaustion attack
-                        tokio::spawn(self.clone().route_packet_from_remote(packet));
+
+                        self.remote_packet_outbox
+                            .write()
+                            .await
+                            .push(packet.destination, packet);
                     } else {
                         let message = self
                             .noise_cache
@@ -177,71 +202,48 @@ impl P2PCommunicator {
         }
     }
 
-    /// Waits infinitely until a gateway has taken our packet
-    pub async fn route_packet(&self, packet: RouteWeaverPacket) {
-        log::trace!(
-            "Attempting to route packet to address {}",
-            packet.destination
-        );
-
-        loop {
-            let out_writers = self.out_writers.read().await;
-            let mut broken_writer = None;
-
-            for (num, writer) in out_writers.iter().enumerate() {
-                // Get the first one for us
-                if let Ok(mut writer) = writer.try_lock() {
-                    match writer.send(packet.clone()).await {
-                        Ok(_) => return,
-                        Err(err) => {
-                            log::warn!("Failed to send packet on: {}", err);
-                            broken_writer = Some(num);
-                            continue;
-                        }
-                    }
-                }
-            }
-
-            if let Some(num) = broken_writer {
-                self.out_writers
-                    .write()
-                    .await
-                    .remove(num)
-                    .into_inner()
-                    .close()
-                    .await
-                    .unwrap();
-            }
-
-            sleep(Duration::from_millis(100)).await;
-        }
-    }
-
-    pub async fn send_message(&self, destination: PublicKey, message: Message) {
+    pub async fn send_message(&self, destination: PublicKey, message: PeerToPeerMessage) {
         if destination == self.public_key {
             log::trace!("Message sent to loopback");
 
             self.inbox
                 .write()
                 .await
-                .get_or_insert_mut(self.public_key, Default::default)
+                .get_mut(&self.public_key)
+                .unwrap()
                 .push_overwrite(message);
-
-            return;
-        }
-
-        if let Some(noise) = self.noise_cache.write().await.get_mut(&destination) {
-            let (pre_encryption, message) = noise.try_encrypt(&self.private_key, message).unwrap();
         } else {
-            todo!()
+            let mut ticket_lock = self.ticket_counter.lock().await;
+            let ticket = *ticket_lock;
+            *ticket_lock = ticket_lock.wrapping_add(1);
+
+            log::trace!("Creating ticket for message {}", ticket);
+
+            self.outbox
+                .write()
+                .await
+                .push(ticket, (message, destination));
+
+            loop {
+                if !self.outbox.read().await.contains(&ticket) {
+                    // Either our packet was sent or the LRU cache overflowed / our ticket overflowed (this one is unlikely)
+                    log::trace!("Message with ticket {} sent or dropped", ticket);
+
+                    return;
+                } else {
+                    sleep(Duration::from_millis(10)).await
+                }
+            }
         }
     }
 
-    pub async fn receive_message(&self, destination: PublicKey) -> Message {
+    pub async fn receive_message(&self, destination: PublicKey) -> PeerToPeerMessage {
         loop {
             let mut inbox_lock = self.inbox.write().await;
 
-            if let Some(inbox) = inbox_lock.get_mut(&self.public_key) {
+            if let Some(inbox) = inbox_lock.get_mut(&destination) {
+                log::info!("Got message from {}", destination);
+
                 if let Some(message) = inbox.pop() {
                     return message;
                 }

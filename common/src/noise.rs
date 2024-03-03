@@ -1,14 +1,17 @@
-use std::{fmt::Display, str::FromStr};
+use std::{fmt::Display, mem::size_of, str::FromStr};
 
 use data_encoding::HEXLOWER_PERMISSIVE;
 use either::{for_both, Either};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use snow::{Builder, HandshakeState, TransportState};
-use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
-    message::{Message, PreEncryptionTransformation, RouteWeaverPacket},
+    message::{
+        PeerToPeerMessage, PreEncryptionTransformation, RouteWeaverPacket,
+        SERIALIZED_PACKET_SIZE_MAX,
+    },
     wire_decode, wire_encode,
 };
 
@@ -61,12 +64,8 @@ static NOISE_PROLOGUE: Lazy<String> =
     Lazy::new(|| format!("router-weaver edition {}", env!("CARGO_PKG_VERSION_MAJOR")));
 
 fn create_noise_builder<'a>() -> Builder<'a> {
-    Builder::new(
-        "Noise_XX_25519_ChaChaPoly_SHA256"
-            .parse()
-            .unwrap(),
-    )
-    .prologue(NOISE_PROLOGUE.as_bytes())
+    Builder::new("Noise_XX_25519_ChaChaPoly_SHA256".parse().unwrap())
+        .prologue(NOISE_PROLOGUE.as_bytes())
 }
 
 pub fn create_keypair() -> (PublicKey, PrivateKey) {
@@ -102,6 +101,7 @@ pub enum DecryptionResult {
 #[derive(Default)]
 pub struct Noise {
     pub internal_noise: Option<Either<HandshakeState, TransportState>>,
+    pub working_buffer: Vec<u8>,
 }
 
 impl Noise {
@@ -132,27 +132,55 @@ impl Noise {
             return PreEncryptionTransformation::Lz4;
         }
 
-        if data.len() > 20 {
-            return PreEncryptionTransformation::Zlib;
-        }
-
         PreEncryptionTransformation::Plain
     }
 
     pub fn try_encrypt(
         &mut self,
         private_key: &PrivateKey,
-        message: Message,
+        message: PeerToPeerMessage,
     ) -> Result<(PreEncryptionTransformation, Vec<u8>), anyhow::Error> {
-        let mut buffer = vec![0; u16::MAX as usize];
-        let message = wire_encode(&message)?;
-        let message = match self.determine_best_prencryption_transformation_for_data(&message) {
-            PreEncryptionTransformation::Plain => message,
-            PreEncryptionTransformation::Lz4 => lz4_flex::compress_prepend_size(&message),
-            PreEncryptionTransformation::Zlib => {
-                miniz_oxide::deflate::compress_to_vec_zlib(&message, 10)
+        // Clear buffer
+        self.working_buffer.fill(0);
+
+        // Encode our message and extract it from the buffer
+        let len = wire_encode(&mut self.working_buffer, &message)?;
+
+        let pre_encryption_transformation =
+            self.determine_best_prencryption_transformation_for_data(&self.working_buffer[..len]);
+
+        let mut data = match pre_encryption_transformation {
+            PreEncryptionTransformation::Plain => &self.working_buffer[..len],
+            // With Lz4 we have to prepend the size ourself
+            PreEncryptionTransformation::Lz4 => {
+                let length_encoding_size = size_of::<u32>();
+
+                // Extract our data
+                let data = self.working_buffer[..len].to_vec();
+
+                // Clear our buffer again
+                self.working_buffer.fill(0);
+
+                // Reserve the buffer for whats coming next
+                self.working_buffer.resize(
+                    length_encoding_size + lz4_flex::block::get_maximum_output_size(len),
+                    0,
+                );
+
+                // Compress into our buffer and release that
+                let len = lz4_flex::block::compress_into(
+                    &data,
+                    &mut self.working_buffer[length_encoding_size..],
+                )?;
+
+                // Copy in the length encoding
+                self.working_buffer[..length_encoding_size]
+                    .copy_from_slice(&(len as u32).to_le_bytes());
+
+                &self.working_buffer[..len]
             }
-        };
+        }
+        .to_vec();
 
         let internal_noise = if self.internal_noise.is_none() {
             self.internal_noise = Some(either::Left(create_initiator(private_key)));
@@ -161,13 +189,37 @@ impl Noise {
             self.internal_noise.as_mut().unwrap()
         };
 
-        match for_both!(internal_noise, internal_noise => internal_noise.write_message(&message, &mut buffer))
+        // Clear buffer
+        self.working_buffer.fill(0);
+
+        // Reserve for packets
+        self.working_buffer.resize(SERIALIZED_PACKET_SIZE_MAX, 0);
+
+        // Return the data finally
+        match for_both!(internal_noise, internal_noise => internal_noise.write_message(&data, &mut self.working_buffer))
         {
             Ok(len) => {
-                buffer.truncate(len);
-                Ok((PreEncryptionTransformation::Lz4, buffer))
+                // Clear out sensitive data
+                self.working_buffer.zeroize();
+                data.zeroize();
+
+                Ok((
+                    pre_encryption_transformation,
+                    self.working_buffer[..len].to_vec(),
+                ))
             }
             Err(err) => Err(err.into()),
+        }
+    }
+
+    fn reverse_pre_encryption_transformations(
+        &self,
+        transformation: PreEncryptionTransformation,
+        buffer: &[u8],
+    ) -> Result<Vec<u8>, anyhow::Error> {
+        match transformation {
+            PreEncryptionTransformation::Plain => Ok(buffer.to_vec()),
+            PreEncryptionTransformation::Lz4 => Ok(lz4_flex::decompress_size_prepended(buffer)?),
         }
     }
 
@@ -175,25 +227,38 @@ impl Noise {
         &mut self,
         private_key: &PrivateKey,
         packet: RouteWeaverPacket,
-    ) -> Result<Option<Message>, DecryptionResult> {
-        let mut buffer = vec![0; u16::MAX as usize];
-
+    ) -> Result<Option<PeerToPeerMessage>, DecryptionResult> {
         if self.internal_noise.is_none() {
             self.internal_noise = Some(either::Left(create_responder(private_key)));
         }
 
+        // Reserve the buffer
+        self.working_buffer.resize(SERIALIZED_PACKET_SIZE_MAX, 0);
+
+        // Clear out internal buffer
+        self.working_buffer.fill(0);
+
         // Try decrypting normally
-        match for_both!(self.internal_noise.as_mut().unwrap(), internal_noise => internal_noise.read_message(&packet.message, &mut buffer))
+        match for_both!(self.internal_noise.as_mut().unwrap(), internal_noise => internal_noise.read_message(&packet.message, &mut self.working_buffer))
         {
             // It worked so return
             Ok(len) => {
-                buffer.truncate(len);
+                // Decompress the data
+                let mut data = self
+                    .reverse_pre_encryption_transformations(
+                        packet.pre_encryption_transformation,
+                        &self.working_buffer[..len],
+                    )
+                    .unwrap();
+                // Extract the message
+                let message = wire_decode(&data).unwrap();
 
-                let message = wire_decode(&buffer).unwrap();
+                // Clear out sensitive data
+                data.zeroize();
 
                 if let Either::Left(noise) = self.internal_noise.as_mut().unwrap() {
                     // If the remote does not want to communicate correctly it may as well not communicate at all
-                    if !matches!(message, Message::Handshake) {
+                    if !matches!(message, PeerToPeerMessage::Handshake) {
                         self.internal_noise = None;
                     // If the handshake is finished and everything looks right lets transition into transport mode
                     } else if noise.is_handshake_finished() {
@@ -220,7 +285,7 @@ impl Noise {
                 } else {
                     // We are in transport mode so we return all messages
                     // Unless its a handshake message which we just ignore because if we know what the Message is then the remote is just messing with us
-                    Ok(if matches!(message, Message::Handshake) {
+                    Ok(if matches!(message, PeerToPeerMessage::Handshake) {
                         log::warn!("Remote sent spurious handshake message when encryption tunnel is operational");
                         None
                     } else {
@@ -234,42 +299,59 @@ impl Noise {
                     err
                 );
 
-                // Clear the buffer
-                buffer.fill(0);
-
-                // It didn't work so its a little more tricky what we have to do here
-                // If we are in handshake state and we are in a responder mode, we will need to send a handshake message and discard this messages
-                // If we are in a handshake state and we are in an initiator mode, we need to try again in responder mode and discard this message. If this fails set the internal state to None
-                // If we are in a transport state, we need to try again in handshake responder mode. If this fails go on like nothing happened
-                // If all else fails, discard the message entirely
-                // This should handle all cases of clients getting confused
+                // Clear the buffer because there is no way to determine if noise actually filled it.
+                // Ah well. I bet LLVM knows
+                self.working_buffer.fill(0);
 
                 // The implications of this is that handshakes with remote nodes could be interrupted to be started again but with another node
                 // This doesn't actually mean someone can fake their identity but it does mean that we are vulnerable to talking to random gateway nodes.
                 // In reality we will try to peer with as many people as possible so I doubt its a issue
 
-                match self.internal_noise.as_mut().unwrap() {
-                    Either::Left(noise) => {
-                        if noise.is_initiator() {
-                            // Try to go into responder mode for this message
-                            let mut new_noise = create_responder(private_key);
-                            // Going into responder mode worked!
-                            if let Ok(len) = new_noise.read_message(&packet.message, &mut buffer) {
-                                buffer.truncate(len);
-                                self.internal_noise = Some(either::Left(new_noise));
-                                log::info!("Message was successfully decrypted in responder mode");
-                                return Ok(Some(wire_decode(&buffer).unwrap()));
-                            } else {
-                                log::error!("Failed to decrypt message in responder mode. Aborting handshake");
-                                self.internal_noise = None;
-                                return Ok(None);
-                            }
-                        }
-                    }
-                    Either::Right(noise) => todo!(),
-                }
+                // Check if we are the initiator or we are currently in a tunnel
+                if (self.internal_noise.as_ref().unwrap().is_left()
+                    && self
+                        .internal_noise
+                        .as_ref()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap_left()
+                        .is_initiator())
+                    || self.internal_noise.as_ref().unwrap().is_right()
+                {
+                    // Try to go into responder mode for this message
+                    let mut new_noise = create_responder(private_key);
 
-                todo!()
+                    // Going into responder mode worked!
+                    if let Ok(len) =
+                        new_noise.read_message(&packet.message, &mut self.working_buffer)
+                    {
+                        self.internal_noise = Some(either::Left(new_noise));
+                        log::info!("Message was successfully decrypted in responder mode");
+
+                        let message = wire_decode(
+                            &self
+                                .reverse_pre_encryption_transformations(
+                                    packet.pre_encryption_transformation,
+                                    &self.working_buffer[..len],
+                                )
+                                .unwrap(),
+                        )
+                        .unwrap();
+
+                        // Clear out sensitive data
+                        self.working_buffer.zeroize();
+
+                        Ok(Some(message))
+                    } else {
+                        log::error!(
+                            "Failed to decrypt message in responder mode. Aborting handshake"
+                        );
+                        self.internal_noise = None;
+                        Ok(None)
+                    }
+                } else {
+                    todo!()
+                }
             }
         }
     }
