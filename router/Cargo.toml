@@ -19,7 +19,6 @@ tokio = { version = "1.36", features = [
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 snow = { workspace = true }
-once_cell = "1.19"
 simple_logger = "4.3"
 log = { workspace = true }
 either = "1.10"
@@ -27,20 +26,25 @@ clap = { version = "4.5", features = ["derive"] }
 async-trait = "0.1"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-itertools = "0.12"
 lru = "0.12"
 ringbuf = "0.3"
+toml = "0.8"
+once_cell = { workspace = true }
+tower = { workspace = true }
+tokio-tower = { workspace = true }
+serde_with = { workspace = true }
+async-bincode = { workspace = true }
 
 # Multiplatform transports
-route-weaver-tcp-transport = { path = "../plugins/tcp-transport", optional = true }
+route-weaver-tcp-transport = { path = "../transports/tcp-transport", optional = true }
 
 # Unix only transports
 [target.'cfg(target_family = "unix")'.dependencies]
-route-weaver-unix-transport = { path = "../plugins/unix-transport", optional = true }
+route-weaver-unix-transport = { path = "../transports/unix-transport", optional = true }
 
 # Linux only transports
 [target.'cfg(target_os = "linux")'.dependencies]
-route-weaver-bluetooth-transport = { path = "../plugins/bluetooth-transport", optional = true }
+route-weaver-bluetooth-transport = { path = "../transports/bluetooth-transport", optional = true }
 
 [features]
 default = ["tcp-transport", "unix-transport", "bluetooth-transport"]

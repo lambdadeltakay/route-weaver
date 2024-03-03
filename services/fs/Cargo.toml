@@ -1,0 +1,21 @@
+[package]
+name = "route-weaver-service-fs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+route-weaver-common = { path = "../../common" }
+once_cell = { workspace = true }
+tokio = { version = "1.36", features = [
+    "sync",
+    "macros",
+    "io-util",
+    "rt",
+    "rt-multi-thread",
+    "time",
+] }
+fuser = "0.14"
+sha2 = "0.10"
+tower = { workspace = true }

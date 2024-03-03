@@ -44,25 +44,6 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in library 'route-weaver-bluetooth-transport'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--lib",
-                    "--package=route-weaver-bluetooth-transport"
-                ],
-                "filter": {
-                    "name": "route-weaver-bluetooth-transport",
-                    "kind": "lib"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
             "name": "Debug unit tests in library 'route-weaver-common'",
             "cargo": {
                 "args": [
@@ -112,6 +93,99 @@
                 "filter": {
                     "name": "route-weaver-unix-transport",
                     "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'route-weaver-bluetooth-transport'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=route-weaver-bluetooth-transport"
+                ],
+                "filter": {
+                    "name": "route-weaver-bluetooth-transport",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'route-weaver-service-fs'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=route-weaver-service-fs",
+                    "--package=route-weaver-service-fs"
+                ],
+                "filter": {
+                    "name": "route-weaver-service-fs",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'route-weaver-service-fs'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=route-weaver-service-fs",
+                    "--package=route-weaver-service-fs"
+                ],
+                "filter": {
+                    "name": "route-weaver-service-fs",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'route-weaver-service-ipv6'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=route-weaver-service-ipv6",
+                    "--package=route-weaver-service-ipv6"
+                ],
+                "filter": {
+                    "name": "route-weaver-service-ipv6",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'route-weaver-service-ipv6'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=route-weaver-service-ipv6",
+                    "--package=route-weaver-service-ipv6"
+                ],
+                "filter": {
+                    "name": "route-weaver-service-ipv6",
+                    "kind": "bin"
                 }
             },
             "args": [],

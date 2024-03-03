@@ -1,21 +1,21 @@
-use crate::{create_initiator, create_responder};
-use either::Either::{self, Left};
 use futures::prelude::{sink::SinkExt, stream::StreamExt, Future};
 use lru::LruCache;
 use ringbuf::Rb;
 use ringbuf::StaticRb;
 use route_weaver_common::{
+    address::TransportAddress,
     message::{
-        Message, RouteWeaverPacket, TransportConnectionReadFramer, TransportConnectionWriteFramer,
+        Message, PacketEncoderDecoder, RouteWeaverPacket, TransportConnectionReadFramer,
+        TransportConnectionWriteFramer,
     },
-    transport::{Transport, TransportAddress},
-    PrivateKey, PublicKey,
+    noise::{Noise, PrivateKey, PublicKey},
+    transport::Transport,
 };
-use snow::{HandshakeState, TransportState};
 use std::{collections::HashMap, num::NonZeroUsize, pin::Pin, sync::Arc, time::Duration};
 use tokio::{
+    io::split,
     sync::{Mutex, RwLock},
-    time::{interval, sleep, timeout, Interval, MissedTickBehavior},
+    time::{interval, sleep, timeout, MissedTickBehavior},
 };
 
 #[derive(Default)]
@@ -69,11 +69,19 @@ impl P2PCommunicatorBuilder {
 
             tokio::spawn(async move {
                 loop {
-                    if let Some(((read, write), address)) = transport.accept().await {
+                    if let Some((transport, address)) = transport.accept().await {
+                        let (read, write) = split(transport);
+                        let (read, write) = (
+                            TransportConnectionReadFramer::new(read, PacketEncoderDecoder),
+                            TransportConnectionWriteFramer::new(write, PacketEncoderDecoder),
+                        );
+
                         // FIXME: We should not store transports that can't produce addresses
                         let gateway_address = address.unwrap_or_else(|| TransportAddress {
-                            protocol: transport_name,
-                            data: "unnamed".to_string(),
+                            protocol: transport_name.to_string(),
+                            address_type: transport_name.to_string(),
+                            data: "unnameable".to_string(),
+                            port: None,
                         });
 
                         log::trace!("Accepted connection from {}", gateway_address);
@@ -97,7 +105,7 @@ pub struct P2PCommunicator {
     private_key: PrivateKey,
     out_writers: RwLock<Vec<Mutex<TransportConnectionWriteFramer>>>,
     inbox: RwLock<LruCache<PublicKey, StaticRb<Message, 1000>>>,
-    noise_cache: RwLock<LruCache<PublicKey, Either<HandshakeState, TransportState>>>,
+    noise_cache: RwLock<LruCache<PublicKey, Noise>>,
 }
 
 impl P2PCommunicator {
@@ -150,76 +158,20 @@ impl P2PCommunicator {
                         log::trace!("Packet is not for us, rerouting to {}", packet.destination);
 
                         // Nodes have no actual obligation to do routing so if routing fails we just drop the packet
+                        // TODO: Add rate limiting or something because this is a very easy memory exhaustion attack
                         tokio::spawn(self.clone().route_packet_from_remote(packet));
                     } else {
-                        // Packet is for us
-                        if let Some(noise) = self.noise_cache.write().await.get_mut(&packet.source)
-                        {
-                            match packet.message.decode(noise.as_mut()) {
-                                // A message from our beloved friends has arrived!
-                                Ok(message) => {
-                                    if matches!(message, Message::Handshake) {
-                                        log::trace!("Received handshake from {}", packet.source);
-                                    }
-                                }
-                                Err(err) => {
-                                    log::error!(
-                                        "A packet marked for us is not decryptable: {}",
-                                        err
-                                    );
-                                    // TODO: Add some kind of counter for undecryptable packets for ratelimiting reasons
-                                }
-                            }
-                        } else {
-                            // We don't have noise for this girl. Handshake now
-                            log::trace!("Handshake needed from {}", packet.source);
-
-                            // First we will try to decrypt this as if it is a Handshake message
-                            let mut new_noise = create_responder(&self.private_key);
-
-                            let treating_message_as_responder_result =
-                                packet.clone().message.decode(Left(&mut new_noise));
-
-                            // Ok so treating it as a responder didn't go well
-                            if treating_message_as_responder_result.is_err()
-                                || !matches!(
-                                    treating_message_as_responder_result.unwrap(),
-                                    Message::Handshake
-                                )
-                            {
-                                log::warn!("Node {} trying to communicate when it has not had a handshake. Initiating handshake", packet.source);
-
-                                // We will try this again but as a initiator
-                                let mut new_noise = create_initiator(&self.private_key);
-                                let me = self.clone();
-
-                                tokio::spawn(async move {
-                                    // TODO: Make this drop noise if it fails
-                                    let _ = timeout(
-                                        Duration::from_secs(60),
-                                        me.route_packet(RouteWeaverPacket::new(
-                                            me.public_key,
-                                            packet.destination,
-                                            Left(&mut new_noise),
-                                            Message::Handshake,
-                                        )),
-                                    )
-                                    .await;
-                                });
-                            } else {
-                                // It worked so store it
-                                self.noise_cache
-                                    .write()
-                                    .await
-                                    .put(packet.source, Left(new_noise));
-                            }
-                        }
+                        let message = self
+                            .noise_cache
+                            .write()
+                            .await
+                            .get_or_insert_mut(packet.source, Noise::default);
                     }
                 }
             // Transport suffered a fatal error and probably closed
             // Drop the thread
             } else {
-                log::error!("Transport {} closed", gateway_address);
+                log::error!("Connection from {} closed", gateway_address);
                 return;
             }
         }
@@ -267,7 +219,7 @@ impl P2PCommunicator {
 
     pub async fn send_message(&self, destination: PublicKey, message: Message) {
         if destination == self.public_key {
-            log::trace!("Message from local system routed to local system");
+            log::trace!("Message sent to loopback");
 
             self.inbox
                 .write()
@@ -279,13 +231,7 @@ impl P2PCommunicator {
         }
 
         if let Some(noise) = self.noise_cache.write().await.get_mut(&destination) {
-            self.route_packet(RouteWeaverPacket::new(
-                self.public_key,
-                destination,
-                noise.as_mut(),
-                message,
-            ))
-            .await;
+            let (pre_encryption, message) = noise.try_encrypt(&self.private_key, message).unwrap();
         } else {
             todo!()
         }

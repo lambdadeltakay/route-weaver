@@ -1,18 +1,17 @@
-use std::{mem::size_of, pin::Pin};
-use either::{for_both, Either};
+use crate::{
+    address::TransportAddress, noise::PublicKey, transport::TransportConnection, wire_decode,
+    wire_encode, wire_measure_size,
+};
+use arrayvec::ArrayVec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use snow::{HandshakeState, TransportState};
+use std::{mem::size_of, pin::Pin};
+use tokio::io::{ReadHalf, WriteHalf};
 use tokio_util::{
     bytes::Buf,
     codec::{Decoder, Encoder, FramedRead, FramedWrite},
 };
 use zeroize::ZeroizeOnDrop;
-
-use crate::{
-    transport::{TransportConnectionReadHalf, TransportConnectionWriteHalf},
-    wire_decode, wire_encode, wire_estimate_size, PublicKey,
-};
 
 #[derive(Clone, Debug, Serialize, Deserialize, ZeroizeOnDrop)]
 pub struct ApplicationId(pub [u8; 32]);
@@ -23,18 +22,13 @@ impl From<&str> for ApplicationId {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, ZeroizeOnDrop)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Message {
     /// Only valid message for handshakes before encryption except for the next one
     /// Valid response messages: Handshake
     Handshake,
     /// Generic response message
     Confirm,
-    /// Ping
-    /// Valid response messages: Pong
-    Ping,
-    /// Ping response
-    Pong,
     /// Asking if its ok to transmit some data over
     /// Valid response messages: OkToReceiveApplicationData
     StartApplicationData {
@@ -42,6 +36,10 @@ pub enum Message {
     },
     /// It's ok to send data as we have a internal plugin listening for this application
     OkToReceiveApplicationData {
+        id: ApplicationId,
+    },
+    /// It's not ok to start a application data stream
+    ApplicationDataRefused {
         id: ApplicationId,
     },
     /// The application data coming along
@@ -59,91 +57,34 @@ pub enum Message {
     ApplicationDataMissing {
         missing_indexes: Vec<u32>,
     },
+    RequestPeerList,
+    PeerList {
+        peer_list: Box<ArrayVec<TransportAddress, 10>>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
-pub enum MessageWrapper {
-    Plain(Vec<u8>),
-    Lz4(Vec<u8>),
+/// What sort of pre encryption transformation we used
+/// This also inadvertantly creates a magic byte for the packet filtering out a lot of totally random messages
+pub enum PreEncryptionTransformation {
+    Plain,
+    Lz4,
+    Zlib,
 }
 
-impl MessageWrapper {
-    pub fn encode(
-        message: Message,
-        noise: Either<&mut HandshakeState, &mut TransportState>,
-    ) -> Self {
-        let message = wire_encode(&message).unwrap();
-        let lz4ed = lz4_flex::compress_prepend_size(&message);
-
-        let (did_we_compress, to_encrypt) = if lz4ed.len() < message.len() {
-            log::trace!(
-                "lz4 compression chosen for message, saving {} bytes",
-                message.len() - lz4ed.len()
-            );
-            (true, lz4ed)
-        } else {
-            log::trace!("No compression chosen for message");
-            (false, message)
-        };
-
-        let mut encryption_buffer = vec![0; u16::MAX as usize];
-        let len = for_both!(noise, noise => noise.write_message(&to_encrypt, &mut encryption_buffer).unwrap());
-
-        if did_we_compress {
-            Self::Lz4(encryption_buffer[..len].to_vec())
-        } else {
-            Self::Plain(encryption_buffer[..len].to_vec())
-        }
-    }
-
-    pub fn decode(
-        &self,
-        noise: Either<&mut HandshakeState, &mut TransportState>,
-    ) -> Result<Message, anyhow::Error> {
-        let mut decryption_buffer = vec![0; u16::MAX as usize];
-
-        match self {
-            MessageWrapper::Plain(message) => {
-                let len =
-                    for_both!(noise, noise => noise.read_message(message, &mut decryption_buffer)?);
-                Ok(wire_decode(&decryption_buffer[..len])?)
-            }
-            MessageWrapper::Lz4(message) => {
-                let len = for_both!(noise, noise => noise.read_message(
-                    &lz4_flex::decompress_size_prepended(message)?, &mut decryption_buffer)?);
-                Ok(wire_decode(&decryption_buffer[..len])?)
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, Hash)]
 pub struct RouteWeaverPacket {
     pub source: PublicKey,
     pub destination: PublicKey,
-    pub message: MessageWrapper,
+    pub pre_encryption_transformation: PreEncryptionTransformation,
+    pub message: Vec<u8>,
 }
 
-impl RouteWeaverPacket {
-    pub fn new(
-        source: PublicKey,
-        destination: PublicKey,
-        noise: Either<&mut HandshakeState, &mut TransportState>,
-        message: Message,
-    ) -> Self {
-        let compressed_message = MessageWrapper::encode(message, noise);
+// We allow a little padding to try to account for if the message is compressed
+pub const MAX_NOISE_MESSAGE_LENGTH: usize = u16::MAX as usize - 128;
 
-        Self {
-            source,
-            destination,
-            message: compressed_message,
-        }
-    }
-}
-
-/// This should be around the max packet size. But i could be wrong
-pub const SERIALIZED_PACKET_SIZE_MAX: usize =
-    u16::MAX as usize + (size_of::<PublicKey>() * 2) + 1024;
+/// I have no clue how noise actually looks like in binary format so we will do this
+pub const SERIALIZED_PACKET_SIZE_MAX: usize = (size_of::<PublicKey>() * 2) + u16::MAX as usize * 2;
 
 #[derive(Default, Debug)]
 pub struct PacketEncoderDecoder;
@@ -168,7 +109,7 @@ impl Decoder for PacketEncoderDecoder {
 
         match wire_decode(src) {
             Ok(packet) => {
-                let size = wire_estimate_size(&packet)?;
+                let size = wire_measure_size(&packet)?;
                 log::trace!("Found a packet of size {}", size);
                 src.advance(size);
                 Ok(Some(packet))
@@ -182,7 +123,7 @@ impl Decoder for PacketEncoderDecoder {
                     src.advance(src.remaining().min(SERIALIZED_PACKET_SIZE_MAX));
                     Ok(None)
                 } else {
-                    log::trace!("Data incomplete, possibly still a packet");
+                    // Packet could be valid but it just hasn't had enough coming in to be deserializable yet
                     Ok(None)
                 }
             }
@@ -206,7 +147,7 @@ impl Encoder<RouteWeaverPacket> for PacketEncoderDecoder {
 }
 
 pub type TransportConnectionWriteFramer =
-    FramedWrite<Pin<Box<dyn TransportConnectionWriteHalf>>, PacketEncoderDecoder>;
+    FramedWrite<WriteHalf<Pin<Box<dyn TransportConnection>>>, PacketEncoderDecoder>;
 
 pub type TransportConnectionReadFramer =
-    FramedRead<Pin<Box<dyn TransportConnectionReadHalf>>, PacketEncoderDecoder>;
+    FramedRead<ReadHalf<Pin<Box<dyn TransportConnection>>>, PacketEncoderDecoder>;
