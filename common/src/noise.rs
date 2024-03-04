@@ -4,7 +4,7 @@ use data_encoding::HEXLOWER_PERMISSIVE;
 use either::{for_both, Either};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use snow::{Builder, HandshakeState, TransportState};
+use snow::{params::NoiseParams, Builder, HandshakeState, TransportState};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
@@ -66,9 +66,11 @@ impl FromStr for PrivateKey {
 static NOISE_PROLOGUE: Lazy<String> =
     Lazy::new(|| format!("router-weaver edition {}", env!("CARGO_PKG_VERSION_MAJOR")));
 
+static NOISE_PATTERN: Lazy<NoiseParams> =
+    Lazy::new(|| "Noise_XX_25519_ChaChaPoly_SHA256".parse().unwrap());
+
 fn create_noise_builder<'a>() -> Builder<'a> {
-    Builder::new("Noise_XX_25519_ChaChaPoly_SHA256".parse().unwrap())
-        .prologue(NOISE_PROLOGUE.as_bytes())
+    Builder::new(NOISE_PATTERN.clone()).prologue(NOISE_PROLOGUE.as_bytes())
 }
 
 pub fn create_keypair() -> (PublicKey, PrivateKey) {
@@ -180,12 +182,9 @@ impl Noise {
         }
         .to_vec();
 
-        let internal_noise = if self.internal_noise.is_none() {
-            self.internal_noise = Some(either::Left(create_initiator(private_key)));
-            self.internal_noise.as_mut().unwrap()
-        } else {
-            self.internal_noise.as_mut().unwrap()
-        };
+        let internal_noise = self
+            .internal_noise
+            .get_or_insert_with(|| either::Left(create_initiator(private_key)));
 
         // Clear buffer
         self.working_buffer.fill(0);
@@ -210,25 +209,14 @@ impl Noise {
         }
     }
 
-    fn reverse_pre_encryption_transformations(
-        &self,
-        transformation: PreEncryptionTransformation,
-        buffer: &[u8],
-    ) -> Result<Vec<u8>, RouteWeaverError> {
-        match transformation {
-            PreEncryptionTransformation::Plain => Ok(buffer.to_vec()),
-            PreEncryptionTransformation::Lz4 => Ok(lz4_flex::decompress_size_prepended(buffer)?),
-        }
-    }
-
     pub fn try_decrypt(
         &mut self,
         private_key: &PrivateKey,
         packet: RouteWeaverPacket,
     ) -> Result<Option<PeerToPeerMessage>, RouteWeaverError> {
-        if self.internal_noise.is_none() {
-            self.internal_noise = Some(either::Left(create_responder(private_key)));
-        }
+        let internal_noise = self
+            .internal_noise
+            .get_or_insert_with(|| either::Left(create_responder(private_key)));
 
         // Reserve the buffer
         self.working_buffer.resize(SERIALIZED_PACKET_SIZE_MAX, 0);
@@ -237,24 +225,23 @@ impl Noise {
         self.working_buffer.fill(0);
 
         // Try decrypting normally
-        match for_both!(self.internal_noise.as_mut().unwrap(), internal_noise => internal_noise.read_message(&packet.message, &mut self.working_buffer))
+        match for_both!(internal_noise, internal_noise => internal_noise.read_message(&packet.message, &mut self.working_buffer))
         {
             // It worked so return
             Ok(len) => {
                 // Decompress the data
-                let mut data = self
-                    .reverse_pre_encryption_transformations(
-                        packet.pre_encryption_transformation,
-                        &self.working_buffer[..len],
-                    )
-                    .unwrap();
+                let mut data = reverse_pre_encryption_transformations(
+                    packet.pre_encryption_transformation,
+                    &self.working_buffer[..len],
+                )
+                .unwrap();
                 // Extract the message
                 let message = wire_decode(&data).unwrap();
 
                 // Clear out sensitive data
                 data.zeroize();
 
-                if let Either::Left(noise) = self.internal_noise.as_mut().unwrap() {
+                if let Either::Left(noise) = internal_noise {
                     // If the remote does not want to communicate correctly it may as well not communicate at all
                     if !matches!(message, PeerToPeerMessage::Handshake) {
                         self.internal_noise = None;
@@ -306,15 +293,9 @@ impl Noise {
                 // In reality we will try to peer with as many people as possible so I doubt its a issue
 
                 // Check if we are the initiator or we are currently in a tunnel
-                if (self.internal_noise.as_ref().unwrap().is_left()
-                    && self
-                        .internal_noise
-                        .as_ref()
-                        .unwrap()
-                        .as_ref()
-                        .unwrap_left()
-                        .is_initiator())
-                    || self.internal_noise.as_ref().unwrap().is_right()
+                if (internal_noise.is_left()
+                    && internal_noise.as_ref().unwrap_left().is_initiator())
+                    || internal_noise.is_right()
                 {
                     // Try to go into responder mode for this message
                     let mut new_noise = create_responder(private_key);
@@ -327,12 +308,11 @@ impl Noise {
                         log::info!("Message was successfully decrypted in responder mode");
 
                         let message = wire_decode(
-                            &self
-                                .reverse_pre_encryption_transformations(
-                                    packet.pre_encryption_transformation,
-                                    &self.working_buffer[..len],
-                                )
-                                .unwrap(),
+                            &reverse_pre_encryption_transformations(
+                                packet.pre_encryption_transformation,
+                                &self.working_buffer[..len],
+                            )
+                            .unwrap(),
                         )
                         .unwrap();
 
@@ -352,5 +332,15 @@ impl Noise {
                 }
             }
         }
+    }
+}
+
+fn reverse_pre_encryption_transformations(
+    transformation: PreEncryptionTransformation,
+    buffer: &[u8],
+) -> Result<Vec<u8>, RouteWeaverError> {
+    match transformation {
+        PreEncryptionTransformation::Plain => Ok(buffer.to_vec()),
+        PreEncryptionTransformation::Lz4 => Ok(lz4_flex::decompress_size_prepended(buffer)?),
     }
 }

@@ -29,7 +29,7 @@ impl Transport for TcpTransport {
         )
         .unwrap();
 
-        // These options are technically not strictly required
+        let _ = socket.set_cloexec(true);
         let _ = socket.set_only_v6(false);
         let _ = socket.set_nonblocking(true);
 

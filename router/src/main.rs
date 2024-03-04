@@ -6,7 +6,10 @@ mod p2p;
 use clap::Parser;
 use log::LevelFilter;
 use p2p::P2PCommunicatorBuilder;
-use route_weaver_common::noise::{PrivateKey, PublicKey};
+use route_weaver_common::{
+    message::{PeerToPeerMessage, PreEncryptionTransformation, RouteWeaverPacket},
+    noise::{PrivateKey, PublicKey},
+};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
@@ -51,7 +54,8 @@ async fn main() {
 
     let mut router = P2PCommunicatorBuilder::default()
         .add_public_key(config.public_key)
-        .add_private_key(config.private_key);
+        .add_private_key(config.private_key)
+        .add_seed_node("/ip/127.0.0.1/tcp/3434".parse().unwrap());
 
     #[cfg(feature = "tcp-transport")]
     if config.enabled_transports.contains("tcp") {
@@ -74,8 +78,12 @@ async fn main() {
         let router = router.clone();
         let sample_key = PublicKey([0; 32]);
 
-        let message = router.receive_message(sample_key).await;
-        router.send_message(sample_key, message).await;
+        router
+            .send_message(
+                sample_key,
+                PeerToPeerMessage::StartApplicationData { id: "ping".into() },
+            )
+            .await;
     }
 
     /*

@@ -1,5 +1,6 @@
-use futures::prelude::{future::FutureExt, sink::SinkExt, stream::StreamExt, Future};
+use futures::prelude::{sink::SinkExt, stream::StreamExt, Future};
 use lru::LruCache;
+use rand::prelude::{IteratorRandom, SeedableRng, SmallRng};
 use ringbuf::Rb;
 use ringbuf::StaticRb;
 use route_weaver_common::{
@@ -10,9 +11,15 @@ use route_weaver_common::{
         TransportConnectionWriteFramer,
     },
     noise::{Noise, PrivateKey, PublicKey},
-    transport::Transport,
+    transport::{Transport, TransportConnection},
 };
-use std::{collections::HashMap, num::NonZeroUsize, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroUsize,
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     io::split,
     sync::RwLock,
@@ -21,10 +28,11 @@ use tokio::{
 
 #[derive(Default)]
 pub struct P2PCommunicatorBuilder {
+    #[allow(clippy::type_complexity)]
     transports: HashMap<&'static str, Pin<Box<dyn Future<Output = Box<dyn Transport>>>>>,
     public_key: Option<PublicKey>,
     private_key: Option<PrivateKey>,
-    seed_node: Option<TransportAddress>,
+    seed_node: Vec<TransportAddress>,
 }
 
 impl P2PCommunicatorBuilder {
@@ -47,7 +55,7 @@ impl P2PCommunicatorBuilder {
     }
 
     pub fn add_seed_node(mut self, seed_node: TransportAddress) -> Self {
-        self.seed_node = Some(seed_node);
+        self.seed_node.push(seed_node);
         self
     }
 
@@ -57,12 +65,17 @@ impl P2PCommunicatorBuilder {
             "No transports were passed into the builder"
         );
 
+        let mut buffer = StaticRb::default();
+        buffer.push_iter(&mut self.seed_node.into_iter());
+
         let communicator = Arc::new(P2PCommunicator {
             public_key: self.public_key.unwrap(),
             private_key: self.private_key.unwrap(),
             inbox: RwLock::new(LruCache::new(NonZeroUsize::new(100).unwrap())),
             writers: RwLock::new(HashMap::new()),
             noise_cache: RwLock::new(LruCache::new(NonZeroUsize::new(100).unwrap())),
+            known_gateways: RwLock::new(Box::new(buffer)),
+            connected_gateways: RwLock::new(HashSet::new()),
         });
 
         for (transport_name, transport) in self.transports.drain() {
@@ -70,51 +83,72 @@ impl P2PCommunicatorBuilder {
             let mut transport = transport.await;
 
             tokio::task::Builder::new()
-                .name(&format!("{} transport listener", transport_name))
+                .name(&format!("{} transport manager", transport_name))
                 .spawn(async move {
-                    loop {
-                        match transport.accept().await {
-                            Ok((transport, address)) => {
-                                let (read, write) = split(transport);
-                                let (read, write) = (
-                                    TransportConnectionReadFramer::new(
-                                        read,
-                                        PacketEncoderDecoder::default(),
-                                    ),
-                                    TransportConnectionWriteFramer::new(
-                                        write,
-                                        PacketEncoderDecoder::default(),
-                                    ),
-                                );
+                    let mut rng = SmallRng::from_entropy();
 
+                    loop {
+                        // Go talk to someone
+                        let gateways_lock = me.known_gateways.read().await;
+                        let connected_gateways_lock = me.connected_gateways.read().await;
+
+                        if let Some(address) = gateways_lock
+                            .iter()
+                            .filter(|address| {
+                                !connected_gateways_lock.contains(address)
+                                    && address.protocol == transport_name
+                            })
+                            .choose(&mut rng)
+                            .cloned()
+                        {
+                            log::info!("Contacting {}", address);
+
+                            // FIXME: A stupid hack
+                            match timeout(
+                                Duration::from_secs(10),
+                                transport.connect(address.clone()),
+                            )
+                            .await
+                            {
+                                Ok(Ok(transport)) => {
+                                    me.clone()
+                                        .handle_new_connection(transport_name, transport, address)
+                                        .await;
+                                }
+                                Ok(Err(err)) => {
+                                    log::warn!(
+                                        "Failed to connect to {} because of {}",
+                                        address,
+                                        err
+                                    );
+                                }
+                                Err(_) => {
+                                    log::warn!(
+                                        "Contacting {} failed because of a timeout",
+                                        address
+                                    );
+                                }
+                            }
+                        }
+
+                        // FIXME: A stupid hack
+                        match timeout(Duration::from_secs(10), transport.accept()).await {
+                            Ok(Ok((transport, address))) => {
                                 // FIXME: We should not store transports that can't produce addresses
-                                let gateway_address = address.unwrap_or_else(|| TransportAddress {
+                                let address = address.unwrap_or_else(|| TransportAddress {
                                     protocol: transport_name.to_string(),
                                     address_type: transport_name.to_string(),
                                     data: "unnameable".to_string(),
                                     port: None,
                                 });
 
-                                log::trace!("Accepted connection from {}", gateway_address);
-
-                                me.writers
-                                    .write()
-                                    .await
-                                    .entry(transport_name)
-                                    .or_insert_with(|| {
-                                        LruCache::new(NonZeroUsize::new(100).unwrap())
-                                    })
-                                    .push(gateway_address.clone(), write);
-
-                                tokio::task::Builder::new()
-                                    .name(&format!("{} gateway listener", gateway_address))
-                                    .spawn(
-                                        me.clone()
-                                            .create_gateway_listener(read, gateway_address.clone()),
-                                    )
-                                    .unwrap();
+                                if !me.connected_gateways.read().await.contains(&address) {
+                                    me.clone()
+                                        .handle_new_connection(transport_name, transport, address)
+                                        .await;
+                                }
                             }
-                            Err(err) => {
+                            Ok(Err(err)) => {
                                 if matches!(
                                     err,
                                     RouteWeaverError::UnsupportedOperationRequestedOnTransport
@@ -128,6 +162,7 @@ impl P2PCommunicatorBuilder {
 
                                 log::error!("Failed to accept connection: {}", err);
                             }
+                            _ => {}
                         }
                     }
                 })
@@ -145,15 +180,49 @@ pub struct P2PCommunicator {
     writers:
         RwLock<HashMap<&'static str, LruCache<TransportAddress, TransportConnectionWriteFramer>>>,
     noise_cache: RwLock<LruCache<PublicKey, Noise>>,
+    known_gateways: RwLock<Box<StaticRb<TransportAddress, 100>>>,
+    connected_gateways: RwLock<HashSet<TransportAddress>>,
 }
 
 impl P2PCommunicator {
+    async fn handle_new_connection(
+        self: Arc<Self>,
+        transport_name: &'static str,
+        connection: Pin<Box<dyn TransportConnection>>,
+        address: TransportAddress,
+    ) {
+        let (read, write) = split(connection);
+        let (read, write) = (
+            TransportConnectionReadFramer::new(read, PacketEncoderDecoder::default()),
+            TransportConnectionWriteFramer::new(write, PacketEncoderDecoder::default()),
+        );
+
+        log::trace!("Accepted connection from {}", address);
+
+        self.writers
+            .write()
+            .await
+            .entry(transport_name)
+            .or_insert_with(|| LruCache::new(NonZeroUsize::new(100).unwrap()))
+            .push(address.clone(), write);
+
+        tokio::task::Builder::new()
+            .name(&format!("{} gateway listener", address))
+            .spawn(self.clone().create_gateway_listener(read, address.clone()))
+            .unwrap();
+    }
+
     async fn create_gateway_listener(
         self: Arc<Self>,
         mut read: TransportConnectionReadFramer,
         gateway_address: TransportAddress,
     ) {
         loop {
+            self.connected_gateways
+                .write()
+                .await
+                .insert(gateway_address.clone());
+
             if let Some(packet) = read.next().await {
                 // Packet decoded ok
                 if let Ok(packet) = packet {
@@ -189,7 +258,7 @@ impl P2PCommunicator {
                         .try_decrypt(&self.private_key, packet.clone())
                         .unwrap()
                     {
-                        log::trace!("Trying to decrypt packet from {}", packet.source);
+                        log::trace!("Decrypted packet from {}", packet.source);
 
                         self.inbox
                             .write()
@@ -197,6 +266,8 @@ impl P2PCommunicator {
                             .get_mut(&packet.source)
                             .unwrap()
                             .push_overwrite(message);
+
+                        return;
                     } else {
                         log::trace!("Packet from {} did not result in a message likely due to it being a handshake related message", packet.source);
                     }
@@ -213,6 +284,12 @@ impl P2PCommunicator {
                     .get_mut(gateway_address.protocol.as_str())
                     .unwrap()
                     .pop(&gateway_address);
+
+                // Discard the connected entry too
+                self.connected_gateways
+                    .write()
+                    .await
+                    .remove(&gateway_address);
 
                 return;
             }
@@ -249,6 +326,20 @@ impl P2PCommunicator {
                         message,
                     })
                     .await;
+
+                    return;
+                } else {
+                    let (pre_encryption_transformation, message) = noise
+                        .try_encrypt(&self.private_key, PeerToPeerMessage::Handshake)
+                        .unwrap();
+
+                    self.route_packet(RouteWeaverPacket {
+                        source: self.public_key,
+                        destination,
+                        pre_encryption_transformation,
+                        message,
+                    })
+                    .await;
                 }
 
                 sleep(Duration::from_millis(10)).await;
@@ -274,7 +365,7 @@ impl P2PCommunicator {
         }
     }
 
-    async fn route_packet(&self, packet: RouteWeaverPacket) {
+    pub async fn route_packet(&self, packet: RouteWeaverPacket) {
         loop {
             let mut writers_lock = self.writers.write().await;
             let mut writers_remove = Vec::new();

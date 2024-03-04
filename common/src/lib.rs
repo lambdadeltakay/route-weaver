@@ -47,7 +47,7 @@ pub fn wire_encode<T: Serialize>(
 
 #[inline]
 pub fn wire_decode<T: DeserializeOwned>(to_decode: &[u8]) -> Result<T, bincode::Error> {
-    Ok(BINCODE_CONFIG.deserialize(to_decode)?)
+    BINCODE_CONFIG.deserialize(to_decode)
 }
 
 #[inline]

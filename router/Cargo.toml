@@ -16,6 +16,7 @@ tokio = { version = "1.36", features = [
     "rt-multi-thread",
     "time",
     "tracing",
+    "fs",
 ] }
 tokio-util = { version = "0.7", features = ["codec"] }
 console-subscriber = "0.2"
@@ -35,6 +36,7 @@ tower = { workspace = true }
 tokio-tower = { workspace = true }
 serde_with = { workspace = true }
 async-bincode = { workspace = true }
+rand = "0.8"
 
 # Multiplatform transports
 route-weaver-tcp-transport = { path = "../transports/tcp-transport", optional = true }

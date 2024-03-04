@@ -17,17 +17,19 @@ impl FromStr for TransportAddress {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut parts = s.split('/');
 
+        parts.next().ok_or(RouteWeaverError::AddressFailedToParse)?;
+
         let address_type = parts
             .next()
-            .ok_or_else(|| RouteWeaverError::AddressFailedToParse)?
-            .to_string();
-        let protocol = parts
-            .next()
-            .ok_or_else(|| RouteWeaverError::AddressFailedToParse)?
+            .ok_or(RouteWeaverError::AddressFailedToParse)?
             .to_string();
         let data = parts
             .next()
-            .ok_or_else(|| RouteWeaverError::AddressFailedToParse)?
+            .ok_or(RouteWeaverError::AddressFailedToParse)?
+            .to_string();
+        let protocol = parts
+            .next()
+            .ok_or(RouteWeaverError::AddressFailedToParse)?
             .to_string();
 
         let port = if let Some(port) = parts.next() {

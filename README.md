@@ -4,5 +4,5 @@ Experimental toy meshnet system inspired by the yggdrasil network. In the design
 
 Goals
     - Uniform among any underlying transport
-    - Capable of operating on extremely unreliable networks but not slow
+    - Capable of operating on extremely unreliable networks (scanning qr codes kinda bad)
 

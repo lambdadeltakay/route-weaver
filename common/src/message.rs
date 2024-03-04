@@ -1,5 +1,6 @@
 use crate::{
-    address::TransportAddress, error::RouteWeaverError, noise::PublicKey, transport::TransportConnection, wire_decode, wire_encode, wire_measure_size
+    address::TransportAddress, error::RouteWeaverError, noise::PublicKey,
+    transport::TransportConnection, wire_decode, wire_encode, wire_measure_size,
 };
 use arrayvec::ArrayVec;
 use serde::{Deserialize, Serialize};
@@ -115,7 +116,7 @@ impl Decoder for PacketEncoderDecoder {
                 // Reject packets with empty messages
                 if packet.message.is_empty() {
                     log::warn!(
-                        "Received an empty packet from {} to {}",
+                        "Received an empty packet from {} to {}, discarding it",
                         packet.source,
                         packet.destination
                     );
