@@ -196,14 +196,16 @@ impl Noise {
         match for_both!(internal_noise, internal_noise => internal_noise.write_message(&data, &mut self.working_buffer))
         {
             Ok(len) => {
+                let result = Ok((
+                    pre_encryption_transformation,
+                    self.working_buffer[..len].to_vec(),
+                ));
+
                 // Clear out sensitive data
                 self.working_buffer.zeroize();
                 data.zeroize();
 
-                Ok((
-                    pre_encryption_transformation,
-                    self.working_buffer[..len].to_vec(),
-                ))
+                result
             }
             Err(err) => Err(err.into()),
         }
