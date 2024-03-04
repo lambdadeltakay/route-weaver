@@ -43,6 +43,7 @@ async fn main() {
         .with_colors(true)
         .init()
         .unwrap();
+
     // console_subscriber::init();
 
     let config: MainRouterConfig =

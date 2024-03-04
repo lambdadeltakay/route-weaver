@@ -1,5 +1,5 @@
-use std::{fmt::Display, str::FromStr};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
+use std::{fmt::Display, str::FromStr};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, SerializeDisplay, DeserializeFromStr)]
 pub struct TransportAddress {

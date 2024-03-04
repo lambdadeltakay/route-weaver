@@ -21,7 +21,7 @@ pub static BINCODE_CONFIG: Lazy<
                 >,
                 bincode::config::BigEndian,
             >,
-            bincode::config::VarintEncoding,
+            bincode::config::FixintEncoding,
         >,
         bincode::config::Bounded,
     >,
@@ -29,7 +29,7 @@ pub static BINCODE_CONFIG: Lazy<
     bincode::DefaultOptions::default()
         .allow_trailing_bytes()
         .with_big_endian()
-        .with_varint_encoding()
+        .with_fixint_encoding()
         .with_limit(SERIALIZED_PACKET_SIZE_MAX as u64)
 });
 

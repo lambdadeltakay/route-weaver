@@ -183,6 +183,15 @@ impl P2PCommunicator {
             // Drop the thread
             } else {
                 log::error!("Connection from {} closed", gateway_address);
+
+                // Discard the writer too
+                self.writers
+                    .write()
+                    .await
+                    .get_mut(gateway_address.protocol.as_str())
+                    .unwrap()
+                    .pop(&gateway_address);
+                
                 return;
             }
         }
@@ -226,6 +235,8 @@ impl P2PCommunicator {
     }
 
     pub async fn receive_message(&self, destination: PublicKey) -> PeerToPeerMessage {
+        log::trace!("Trying to receive message from {}", destination);
+
         loop {
             let mut inbox_lock = self.inbox.write().await;
 

@@ -102,23 +102,45 @@ impl Decoder for PacketEncoderDecoder {
             return Ok(None);
         }
 
-        src.reserve(SERIALIZED_PACKET_SIZE_MAX);
+        src.reserve(SERIALIZED_PACKET_SIZE_MAX.saturating_sub(src.len()));
 
         // On purpose our packets don't have any magic bytes and in its bincode serialized format before decryption
         // Only around 2 fields could be incorrect
         // I've practiced feeding it urandom however and not many totally random (ie corrupted) packets get through
 
-        match wire_decode(src) {
+        match wire_decode::<RouteWeaverPacket>(src) {
             Ok(packet) => {
                 let size = wire_measure_size(&packet)?;
-                log::trace!("Found a packet of size {}", size);
                 src.advance(size);
+
+                // Reject packets with empty messages
+                if packet.message.is_empty() {
+                    log::warn!(
+                        "Received an empty packet from {} to {}",
+                        packet.source,
+                        packet.destination
+                    );
+                    return Ok(None);
+                }
+
+                log::trace!("Found a packet of size {}", size);
+                log::trace!(
+                    "This packet claims to be from {} and going to {}",
+                    packet.source,
+                    packet.destination
+                );
+                log::trace!(
+                    "The message is {} bytes long and claims to have pre encryption transformation {:?}", 
+                    packet.message.len(),
+                    packet.pre_encryption_transformation
+                );
+
                 Ok(Some(packet))
             }
             Err(_) => {
                 if src.len() > SERIALIZED_PACKET_SIZE_MAX {
                     // Drop the rest of the buffer
-                    src.clear();
+                    src.advance(SERIALIZED_PACKET_SIZE_MAX.min(src.len()));
                     Ok(None)
                 } else {
                     // Packet could be valid but it just hasn't had enough coming in to be deserializable yet
