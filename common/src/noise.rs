@@ -227,7 +227,7 @@ impl Noise {
         &mut self,
         private_key: &PrivateKey,
         packet: RouteWeaverPacket,
-    ) -> Result<Option<PeerToPeerMessage>, DecryptionResult> {
+    ) -> Result<Option<PeerToPeerMessage>, anyhow::Error> {
         if self.internal_noise.is_none() {
             self.internal_noise = Some(either::Left(create_responder(private_key)));
         }

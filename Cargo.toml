@@ -11,6 +11,3 @@ tokio-tower = "0.6"
 serde_with = "3.6"
 # For several reasons we don't use this for anything but interdaemon communication
 async-bincode = "0.7"
-
-[profile.release]
-debug = true

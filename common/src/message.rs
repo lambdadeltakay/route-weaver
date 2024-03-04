@@ -117,8 +117,6 @@ impl Decoder for PacketEncoderDecoder {
             }
             Err(_) => {
                 if src.len() > SERIALIZED_PACKET_SIZE_MAX {
-                    log::error!("Data hit the max buffer size without being deserializable, couldn't possibly be a packet");
-
                     // Drop the rest of the buffer
                     src.clear();
                     Ok(None)

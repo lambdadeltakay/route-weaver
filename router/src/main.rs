@@ -3,29 +3,16 @@ mod p2p;
 
 // mod application_streamer;
 
-use async_bincode::tokio::AsyncBincodeStream;
 use clap::Parser;
-use futures::prelude::sink::SinkExt;
 use log::LevelFilter;
 use p2p::P2PCommunicatorBuilder;
-use route_weaver_common::{
-    message::PeerToPeerMessage,
-    noise::{PrivateKey, PublicKey},
-    router::{ClientBoundMessage, RouterBoundMessage},
-};
+use route_weaver_common::noise::{PrivateKey, PublicKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
 use simple_logger::SimpleLogger;
-use snow::{Builder, HandshakeState};
-use std::{collections::HashSet, env::temp_dir, net::Ipv6Addr, path::PathBuf, time::Duration};
-use tokio::{
-    fs::{read_to_string, remove_file},
-    net::UnixListener,
-    time::{sleep, timeout},
-};
-use tokio_tower::pipeline::Server;
-use tower::ServiceBuilder;
+use std::{collections::HashSet, path::PathBuf};
+use tokio::fs::read_to_string;
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
@@ -49,9 +36,14 @@ pub struct Arguments {
 async fn main() {
     SimpleLogger::new()
         .with_level(LevelFilter::Trace)
+        // Shut up tokio
+        .with_module_level("tracing", LevelFilter::Info)
+        .with_module_level("runtime", LevelFilter::Info)
+        .with_module_level("tokio", LevelFilter::Info)
         .with_colors(true)
         .init()
         .unwrap();
+    // console_subscriber::init();
 
     let config: MainRouterConfig =
         toml::from_str(&read_to_string("router.toml").await.unwrap()).unwrap();

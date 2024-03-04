@@ -15,8 +15,10 @@ tokio = { version = "1.36", features = [
     "rt",
     "rt-multi-thread",
     "time",
+    "tracing",
 ] }
 tokio-util = { version = "0.7", features = ["codec"] }
+console-subscriber = "0.2"
 futures = "0.3"
 snow = { workspace = true }
 simple_logger = "4.3"
