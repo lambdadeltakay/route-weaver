@@ -8,6 +8,7 @@ use snow::{Builder, HandshakeState, TransportState};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
+    error::RouteWeaverError,
     message::{
         PeerToPeerMessage, PreEncryptionTransformation, RouteWeaverPacket,
         SERIALIZED_PACKET_SIZE_MAX,
@@ -25,14 +26,15 @@ impl Display for PublicKey {
 }
 
 impl FromStr for PublicKey {
-    type Err = anyhow::Error;
+    type Err = RouteWeaverError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(PublicKey(
             HEXLOWER_PERMISSIVE
-                .decode(s.as_bytes())?
+                .decode(s.as_bytes())
+                .map_err(|_| RouteWeaverError::KeyFailedToParse)?
                 .try_into()
-                .map_err(|_| anyhow::anyhow!("Invalid public key"))?,
+                .map_err(|_| RouteWeaverError::KeyFailedToParse)?,
         ))
     }
 }
@@ -47,14 +49,15 @@ impl Display for PrivateKey {
 }
 
 impl FromStr for PrivateKey {
-    type Err = anyhow::Error;
+    type Err = RouteWeaverError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(PrivateKey(
             HEXLOWER_PERMISSIVE
-                .decode(s.as_bytes())?
+                .decode(s.as_bytes())
+                .map_err(|_| RouteWeaverError::KeyFailedToParse)?
                 .try_into()
-                .map_err(|_| anyhow::anyhow!("Invalid private key"))?,
+                .map_err(|_| RouteWeaverError::KeyFailedToParse)?,
         ))
     }
 }
@@ -89,11 +92,6 @@ fn create_initiator(key: &PrivateKey) -> HandshakeState {
         .local_private_key(&key.0)
         .build_initiator()
         .unwrap()
-}
-
-pub enum DecryptionResult {
-    NeedsHandshakeSent,
-    UnknownError(anyhow::Error),
 }
 
 /// Helper to make working with noise protocol less painful
@@ -139,7 +137,7 @@ impl Noise {
         &mut self,
         private_key: &PrivateKey,
         message: PeerToPeerMessage,
-    ) -> Result<(PreEncryptionTransformation, Vec<u8>), anyhow::Error> {
+    ) -> Result<(PreEncryptionTransformation, Vec<u8>), RouteWeaverError> {
         // Clear buffer
         self.working_buffer.fill(0);
 
@@ -216,7 +214,7 @@ impl Noise {
         &self,
         transformation: PreEncryptionTransformation,
         buffer: &[u8],
-    ) -> Result<Vec<u8>, anyhow::Error> {
+    ) -> Result<Vec<u8>, RouteWeaverError> {
         match transformation {
             PreEncryptionTransformation::Plain => Ok(buffer.to_vec()),
             PreEncryptionTransformation::Lz4 => Ok(lz4_flex::decompress_size_prepended(buffer)?),
@@ -227,7 +225,7 @@ impl Noise {
         &mut self,
         private_key: &PrivateKey,
         packet: RouteWeaverPacket,
-    ) -> Result<Option<PeerToPeerMessage>, anyhow::Error> {
+    ) -> Result<Option<PeerToPeerMessage>, RouteWeaverError> {
         if self.internal_noise.is_none() {
             self.internal_noise = Some(either::Left(create_responder(private_key)));
         }

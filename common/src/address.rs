@@ -1,6 +1,8 @@
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use std::{fmt::Display, str::FromStr};
 
+use crate::error::RouteWeaverError;
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, SerializeDisplay, DeserializeFromStr)]
 pub struct TransportAddress {
     pub address_type: String,
@@ -10,26 +12,29 @@ pub struct TransportAddress {
 }
 
 impl FromStr for TransportAddress {
-    type Err = anyhow::Error;
+    type Err = RouteWeaverError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut parts = s.split('/');
 
         let address_type = parts
             .next()
-            .ok_or_else(|| anyhow::anyhow!("Invalid address"))?
+            .ok_or_else(|| RouteWeaverError::AddressFailedToParse)?
             .to_string();
         let protocol = parts
             .next()
-            .ok_or_else(|| anyhow::anyhow!("Invalid address"))?
+            .ok_or_else(|| RouteWeaverError::AddressFailedToParse)?
             .to_string();
         let data = parts
             .next()
-            .ok_or_else(|| anyhow::anyhow!("Invalid address"))?
+            .ok_or_else(|| RouteWeaverError::AddressFailedToParse)?
             .to_string();
 
         let port = if let Some(port) = parts.next() {
-            Some(port.parse()?)
+            Some(
+                port.parse()
+                    .map_err(|_| RouteWeaverError::AddressFailedToParse)?,
+            )
         } else {
             None
         };

@@ -1,5 +1,6 @@
 use route_weaver_common::{
     address::TransportAddress,
+    error::RouteWeaverError,
     transport::{Transport, TransportConnection},
 };
 use std::pin::{pin, Pin};
@@ -35,28 +36,40 @@ impl Transport for UnixTransport {
     async fn connect(
         &mut self,
         address: TransportAddress,
-    ) -> Option<Pin<Box<dyn TransportConnection>>> {
-        let path = address.data.parse::<PathBuf>().unwrap();
+    ) -> Result<Pin<Box<dyn TransportConnection>>, RouteWeaverError> {
+        let path = address
+            .data
+            .parse::<PathBuf>()
+            .map_err(|_| RouteWeaverError::AddressFailedToParse)?;
 
-        UnixStream::connect(path).await.ok().map(|stream| {
-            Box::pin(UnixTransportConnection { stream }) as Pin<Box<dyn TransportConnection>>
-        })
+        UnixStream::connect(path)
+            .await
+            .map(|stream| {
+                Box::pin(UnixTransportConnection { stream }) as Pin<Box<dyn TransportConnection>>
+            })
+            .map_err(RouteWeaverError::Custom)
     }
 
     async fn accept(
         &mut self,
-    ) -> Option<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>)> {
-        self.socket.accept().await.ok().map(|(stream, addr)| {
-            (
-                Box::pin(UnixTransportConnection { stream }) as Pin<Box<dyn TransportConnection>>,
-                addr.as_pathname().map(|path| TransportAddress {
-                    address_type: "unix".into(),
-                    protocol: "unix".into(),
-                    data: path.to_string_lossy().into_owned(),
-                    port: None,
-                }),
-            )
-        })
+    ) -> Result<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>), RouteWeaverError>
+    {
+        self.socket
+            .accept()
+            .await
+            .map(|(stream, addr)| {
+                (
+                    Box::pin(UnixTransportConnection { stream })
+                        as Pin<Box<dyn TransportConnection>>,
+                    addr.as_pathname().map(|path| TransportAddress {
+                        address_type: "unix".into(),
+                        protocol: "unix".into(),
+                        data: path.to_string_lossy().into_owned(),
+                        port: None,
+                    }),
+                )
+            })
+            .map_err(RouteWeaverError::Custom)
     }
 }
 

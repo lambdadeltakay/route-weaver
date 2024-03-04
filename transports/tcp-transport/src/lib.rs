@@ -1,5 +1,6 @@
 use route_weaver_common::{
     address::TransportAddress,
+    error::RouteWeaverError,
     transport::{Transport, TransportConnection},
 };
 use socket2::Socket;
@@ -49,40 +50,49 @@ impl Transport for TcpTransport {
     async fn connect(
         &mut self,
         address: TransportAddress,
-    ) -> Option<Pin<Box<dyn TransportConnection>>> {
+    ) -> Result<Pin<Box<dyn TransportConnection>>, RouteWeaverError> {
         let addr = SocketAddr::new(address.data.parse().unwrap(), 3434);
 
-        TcpStream::connect(addr).await.ok().map(|stream| {
-            Box::pin(TcpTransportConnection { stream }) as Pin<Box<dyn TransportConnection>>
-        })
+        TcpStream::connect(addr)
+            .await
+            .map(|stream| {
+                Box::pin(TcpTransportConnection { stream }) as Pin<Box<dyn TransportConnection>>
+            })
+            .map_err(RouteWeaverError::Custom)
     }
 
     async fn accept(
         &mut self,
-    ) -> Option<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>)> {
-        self.socket.accept().await.ok().map(|(stream, address)| {
-            (
-                Box::pin(TcpTransportConnection { stream }) as Pin<Box<dyn TransportConnection>>,
-                {
-                    match address.ip() {
-                        IpAddr::V4(ip) => Some(TransportAddress {
-                            address_type: "ip".to_string(),
-                            protocol: "tcp".to_string(),
-                            data: ip.to_string(),
-                            port: Some(address.port()),
-                        }),
-                        IpAddr::V6(ip) => Some(TransportAddress {
-                            address_type: "ip".to_string(),
-                            protocol: "tcp".to_string(),
-                            data: ip
-                                .to_ipv4_mapped()
-                                .map_or_else(|| ip.to_string(), |ip| ip.to_string()),
-                            port: Some(address.port()),
-                        }),
-                    }
-                },
-            )
-        })
+    ) -> Result<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>), RouteWeaverError>
+    {
+        self.socket
+            .accept()
+            .await
+            .map(|(stream, address)| {
+                (
+                    Box::pin(TcpTransportConnection { stream })
+                        as Pin<Box<dyn TransportConnection>>,
+                    {
+                        match address.ip() {
+                            IpAddr::V4(ip) => Some(TransportAddress {
+                                address_type: "ip".to_string(),
+                                protocol: "tcp".to_string(),
+                                data: ip.to_string(),
+                                port: Some(address.port()),
+                            }),
+                            IpAddr::V6(ip) => Some(TransportAddress {
+                                address_type: "ip".to_string(),
+                                protocol: "tcp".to_string(),
+                                data: ip
+                                    .to_ipv4_mapped()
+                                    .map_or_else(|| ip.to_string(), |ip| ip.to_string()),
+                                port: Some(address.port()),
+                            }),
+                        }
+                    },
+                )
+            })
+            .map_err(RouteWeaverError::Custom)
     }
 }
 

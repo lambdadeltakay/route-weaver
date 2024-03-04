@@ -4,6 +4,7 @@ use once_cell::sync::Lazy;
 use serde::{de::DeserializeOwned, Serialize};
 
 pub mod address;
+pub mod error;
 pub mod message;
 pub mod noise;
 pub mod router;
@@ -37,7 +38,7 @@ pub static BINCODE_CONFIG: Lazy<
 pub fn wire_encode<T: Serialize>(
     buffer: &mut Vec<u8>,
     to_encode: &T,
-) -> Result<usize, anyhow::Error> {
+) -> Result<usize, bincode::Error> {
     let len = wire_measure_size(to_encode)?;
     buffer.reserve(len.saturating_sub(buffer.len()));
     BINCODE_CONFIG.serialize_into(buffer, to_encode)?;
@@ -45,11 +46,11 @@ pub fn wire_encode<T: Serialize>(
 }
 
 #[inline]
-pub fn wire_decode<T: DeserializeOwned>(to_decode: &[u8]) -> Result<T, anyhow::Error> {
+pub fn wire_decode<T: DeserializeOwned>(to_decode: &[u8]) -> Result<T, bincode::Error> {
     Ok(BINCODE_CONFIG.deserialize(to_decode)?)
 }
 
 #[inline]
-pub fn wire_measure_size<T: Serialize>(to_encode: &T) -> Result<usize, anyhow::Error> {
+pub fn wire_measure_size<T: Serialize>(to_encode: &T) -> Result<usize, bincode::Error> {
     Ok(BINCODE_CONFIG.serialized_size(to_encode)? as usize)
 }

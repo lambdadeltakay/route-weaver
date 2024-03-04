@@ -1,7 +1,6 @@
 use bluer::l2cap::{SocketAddr, Stream, StreamListener};
 use route_weaver_common::{
-    address::TransportAddress,
-    transport::{Transport, TransportConnection},
+    address::TransportAddress, error::RouteWeaverError, transport::{Transport, TransportConnection}
 };
 use std::pin::{pin, Pin};
 use std::task::Poll;
@@ -29,33 +28,41 @@ impl Transport for BluetoothTransport {
     async fn connect(
         &mut self,
         address: TransportAddress,
-    ) -> Option<Pin<Box<dyn TransportConnection>>> {
+    ) -> Result<Pin<Box<dyn TransportConnection>>, RouteWeaverError> {
         let addr = SocketAddr::new(
             address.data.parse().unwrap(),
             bluer::AddressType::LePublic,
             address.port.unwrap(),
         );
 
-        Stream::connect(addr).await.ok().map(|stream| {
-            Box::pin(BluetoothTransportConnection { stream }) as Pin<Box<dyn TransportConnection>>
-        })
+        Stream::connect(addr)
+            .await
+            .map(|stream| {
+                Box::pin(BluetoothTransportConnection { stream })
+                    as Pin<Box<dyn TransportConnection>>
+            })
+            .map_err(RouteWeaverError::Custom)
     }
 
     async fn accept(
         &mut self,
-    ) -> Option<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>)> {
-        self.socket.accept().await.ok().map(|(stream, addr)| {
-            (
-                Box::pin(BluetoothTransportConnection { stream })
-                    as Pin<Box<dyn TransportConnection>>,
-                Some(TransportAddress {
-                    address_type: "bluetooth".into(),
-                    protocol: "bluetooth".into(),
-                    data: addr.addr.to_string(),
-                    port: Some(addr.psm),
-                }),
-            )
-        })
+    ) -> Result<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>), RouteWeaverError> {
+        self.socket
+            .accept()
+            .await
+            .map(|(stream, addr)| {
+                (
+                    Box::pin(BluetoothTransportConnection { stream })
+                        as Pin<Box<dyn TransportConnection>>,
+                    Some(TransportAddress {
+                        address_type: "bluetooth".into(),
+                        protocol: "bluetooth".into(),
+                        data: addr.addr.to_string(),
+                        port: Some(addr.psm),
+                    }),
+                )
+            })
+            .map_err(RouteWeaverError::Custom)
     }
 }
 

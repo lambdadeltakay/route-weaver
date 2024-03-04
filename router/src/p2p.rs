@@ -4,6 +4,7 @@ use ringbuf::Rb;
 use ringbuf::StaticRb;
 use route_weaver_common::{
     address::TransportAddress,
+    error::RouteWeaverError,
     message::{
         PacketEncoderDecoder, PeerToPeerMessage, RouteWeaverPacket, TransportConnectionReadFramer,
         TransportConnectionWriteFramer,
@@ -51,7 +52,10 @@ impl P2PCommunicatorBuilder {
     }
 
     pub async fn build(mut self) -> Arc<P2PCommunicator> {
-        assert!(!self.transports.is_empty());
+        assert!(
+            !self.transports.is_empty(),
+            "No transports were passed into the builder"
+        );
 
         let communicator = Arc::new(P2PCommunicator {
             public_key: self.public_key.unwrap(),
@@ -69,43 +73,61 @@ impl P2PCommunicatorBuilder {
                 .name(&format!("{} transport listener", transport_name))
                 .spawn(async move {
                     loop {
-                        if let Some((transport, address)) = transport.accept().await {
-                            let (read, write) = split(transport);
-                            let (read, write) = (
-                                TransportConnectionReadFramer::new(
-                                    read,
-                                    PacketEncoderDecoder::default(),
-                                ),
-                                TransportConnectionWriteFramer::new(
-                                    write,
-                                    PacketEncoderDecoder::default(),
-                                ),
-                            );
+                        match transport.accept().await {
+                            Ok((transport, address)) => {
+                                let (read, write) = split(transport);
+                                let (read, write) = (
+                                    TransportConnectionReadFramer::new(
+                                        read,
+                                        PacketEncoderDecoder::default(),
+                                    ),
+                                    TransportConnectionWriteFramer::new(
+                                        write,
+                                        PacketEncoderDecoder::default(),
+                                    ),
+                                );
 
-                            // FIXME: We should not store transports that can't produce addresses
-                            let gateway_address = address.unwrap_or_else(|| TransportAddress {
-                                protocol: transport_name.to_string(),
-                                address_type: transport_name.to_string(),
-                                data: "unnameable".to_string(),
-                                port: None,
-                            });
+                                // FIXME: We should not store transports that can't produce addresses
+                                let gateway_address = address.unwrap_or_else(|| TransportAddress {
+                                    protocol: transport_name.to_string(),
+                                    address_type: transport_name.to_string(),
+                                    data: "unnameable".to_string(),
+                                    port: None,
+                                });
 
-                            log::trace!("Accepted connection from {}", gateway_address);
+                                log::trace!("Accepted connection from {}", gateway_address);
 
-                            me.writers
-                                .write()
-                                .await
-                                .entry(transport_name)
-                                .or_insert_with(|| LruCache::new(NonZeroUsize::new(100).unwrap()))
-                                .push(gateway_address.clone(), write);
+                                me.writers
+                                    .write()
+                                    .await
+                                    .entry(transport_name)
+                                    .or_insert_with(|| {
+                                        LruCache::new(NonZeroUsize::new(100).unwrap())
+                                    })
+                                    .push(gateway_address.clone(), write);
 
-                            tokio::task::Builder::new()
-                                .name(&format!("{} gateway listener", gateway_address))
-                                .spawn(
-                                    me.clone()
-                                        .create_gateway_listener(read, gateway_address.clone()),
-                                )
-                                .unwrap();
+                                tokio::task::Builder::new()
+                                    .name(&format!("{} gateway listener", gateway_address))
+                                    .spawn(
+                                        me.clone()
+                                            .create_gateway_listener(read, gateway_address.clone()),
+                                    )
+                                    .unwrap();
+                            }
+                            Err(err) => {
+                                if matches!(
+                                    err,
+                                    RouteWeaverError::UnsupportedOperationRequestedOnTransport
+                                ) {
+                                    log::warn!(
+                                        "{} accepting connections is not support for",
+                                        transport_name
+                                    );
+                                    return;
+                                }
+
+                                log::error!("Failed to accept connection: {}", err);
+                            }
                         }
                     }
                 })
@@ -191,7 +213,7 @@ impl P2PCommunicator {
                     .get_mut(gateway_address.protocol.as_str())
                     .unwrap()
                     .pop(&gateway_address);
-                
+
                 return;
             }
         }

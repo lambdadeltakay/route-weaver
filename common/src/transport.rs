@@ -1,7 +1,9 @@
 use std::{fmt::Debug, pin::Pin, time::Duration};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::{address::TransportAddress, message::SERIALIZED_PACKET_SIZE_MAX};
+use crate::{
+    address::TransportAddress, error::RouteWeaverError, message::SERIALIZED_PACKET_SIZE_MAX,
+};
 
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync + Debug + 'static {
@@ -15,14 +17,15 @@ pub trait Transport: Send + Sync + Debug + 'static {
     async fn connect(
         &mut self,
         _address: TransportAddress,
-    ) -> Option<Pin<Box<dyn TransportConnection>>> {
-        None
+    ) -> Result<Pin<Box<dyn TransportConnection>>, RouteWeaverError> {
+        Err(RouteWeaverError::UnsupportedOperationRequestedOnTransport)
     }
 
     async fn accept(
         &mut self,
-    ) -> Option<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>)> {
-        None
+    ) -> Result<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>), RouteWeaverError>
+    {
+        Err(RouteWeaverError::UnsupportedOperationRequestedOnTransport)
     }
 }
 

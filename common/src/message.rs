@@ -1,6 +1,5 @@
 use crate::{
-    address::TransportAddress, noise::PublicKey, transport::TransportConnection, wire_decode,
-    wire_encode, wire_measure_size,
+    address::TransportAddress, error::RouteWeaverError, noise::PublicKey, transport::TransportConnection, wire_decode, wire_encode, wire_measure_size
 };
 use arrayvec::ArrayVec;
 use serde::{Deserialize, Serialize};
@@ -92,7 +91,7 @@ pub struct PacketEncoderDecoder {
 
 impl Decoder for PacketEncoderDecoder {
     type Item = RouteWeaverPacket;
-    type Error = anyhow::Error;
+    type Error = RouteWeaverError;
 
     fn decode(
         &mut self,
@@ -152,7 +151,7 @@ impl Decoder for PacketEncoderDecoder {
 }
 
 impl Encoder<RouteWeaverPacket> for PacketEncoderDecoder {
-    type Error = anyhow::Error;
+    type Error = RouteWeaverError;
 
     fn encode(
         &mut self,
