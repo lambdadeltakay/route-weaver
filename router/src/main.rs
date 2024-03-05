@@ -1,15 +1,14 @@
 mod connection_manager;
 mod gateway;
+mod message;
+mod noise;
 mod p2p;
 
-// mod application_streamer;
-
 use clap::Parser;
-use log::LevelFilter;
+use message::PeerToPeerMessage;
 use p2p::P2PCommunicatorBuilder;
 use route_weaver_common::{
     address::TransportAddress,
-    message::PeerToPeerMessage,
     noise::{PrivateKey, PublicKey},
 };
 use serde::{Deserialize, Serialize};

@@ -2,19 +2,22 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RouteWeaverError {
+    #[error("Suspicious remote behavior")]
+    SuspiciousRemoteBehavior,
+    #[error("Handshake in established tunnel")]
+    HandshakeInEstablishedTunnel,
+    #[error("Handshake ordering is off")]
+    HandshakeOrderingOff,
     #[error("Operation unsupported for this type of transport")]
     UnsupportedOperationRequestedOnTransport,
-
     #[error("Failed to parse address")]
     AddressFailedToParse,
     #[error("Failed to parse key")]
     KeyFailedToParse,
-    #[error("Lz4 Compression related error: {0}")]
-    Lz4CompressionRelatedError(#[from] lz4_flex::block::CompressError),
-    #[error("Lz4 Decompression related error: {0}")]
-    Lz4DecompressionRelatedError(#[from] lz4_flex::block::DecompressError),
-    #[error("Bincode related error: {0}")]
-    BincodeRelatedError(#[from] bincode::Error),
+    #[error("Failed to parse packet")]
+    PacketDecodingError,
+    #[error("Failed to process message")]
+    UnencryptedMessageProcessingError,
     #[error("Snow related error: {0}")]
     SnowRelatedError(#[from] snow::Error),
     #[error("Unknown error: {0}")]

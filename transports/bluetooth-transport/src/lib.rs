@@ -1,9 +1,14 @@
 use bluer::l2cap::{SocketAddr, Stream, StreamListener};
 use route_weaver_common::{
-    address::TransportAddress, error::RouteWeaverError, transport::{Transport, TransportConnection}
+    address::TransportAddress,
+    error::RouteWeaverError,
+    transport::{Transport, TransportConnection},
 };
-use std::{pin::{pin, Pin}, sync::Arc};
 use std::task::Poll;
+use std::{
+    pin::{pin, Pin},
+    sync::Arc,
+};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 #[derive(Debug)]
@@ -46,7 +51,8 @@ impl Transport for BluetoothTransport {
 
     async fn accept(
         &self,
-    ) -> Result<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>), RouteWeaverError> {
+    ) -> Result<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>), RouteWeaverError>
+    {
         self.socket
             .accept()
             .await

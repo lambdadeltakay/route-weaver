@@ -1,3 +1,11 @@
+use crate::{
+    connection_manager::ConnectionManager,
+    message::{
+        PacketEncoderDecoder, PeerToPeerMessage, RouteWeaverPacket, TransportConnectionReadFramer,
+        TransportConnectionWriteFramer,
+    },
+    noise::Noise,
+};
 use futures::prelude::{sink::SinkExt, stream::StreamExt, Future};
 use lru::LruCache;
 use rand::prelude::{IteratorRandom, SeedableRng, SmallRng};
@@ -6,11 +14,7 @@ use ringbuf::StaticRb;
 use route_weaver_common::{
     address::TransportAddress,
     error::RouteWeaverError,
-    message::{
-        PacketEncoderDecoder, PeerToPeerMessage, RouteWeaverPacket, TransportConnectionReadFramer,
-        TransportConnectionWriteFramer,
-    },
-    noise::{Noise, PrivateKey, PublicKey},
+    noise::{PrivateKey, PublicKey},
     transport::{Transport, TransportConnection},
 };
 use std::{collections::HashMap, num::NonZeroUsize, pin::Pin, sync::Arc, time::Duration};
@@ -19,8 +23,6 @@ use tokio::{
     sync::RwLock,
     time::{sleep, timeout},
 };
-
-use crate::connection_manager::ConnectionManager;
 
 #[derive(Default)]
 pub struct P2PCommunicatorBuilder {
@@ -232,44 +234,39 @@ impl P2PCommunicator {
                     } else {
                         let mut noise_lock = self.noise_cache.write().await;
                         let noise = noise_lock.get_or_insert_mut(packet.source, || {
-                            Noise::new(&self.private_key, false)
+                            Noise::new(self.private_key.clone())
                         });
 
-                        if noise.is_their_turn() {
-                            match noise.try_decrypt(&self.private_key, packet.clone()) {
-                                Ok(message) => {
-                                    if let Some(message) = message {
-                                        let _ = self
-                                            .inbox
-                                            .write()
-                                            .await
-                                            .get_or_insert_mut(packet.source, StaticRb::default)
-                                            .push(message);
-                                    } else {
-                                        // The absorbed message was some kind of handshake message
-                                        let me = self.clone();
-
-                                        tokio::spawn(async move {
-                                            let _ = timeout(
-                                                Duration::from_millis(250),
-                                                me.send_message(
-                                                    packet.source,
-                                                    PeerToPeerMessage::Handshake,
-                                                ),
-                                            )
-                                            .await;
-                                        });
-                                    }
+                        match noise.try_decrypt(packet.clone()) {
+                            Ok(message) => {
+                                // Respond to a handshake if needed
+                                if matches!(message, PeerToPeerMessage::Handshake)
+                                    && !noise.is_transport_capable()
+                                    && noise.is_my_turn()
+                                {
+                                    let me = self.clone();
+                                    tokio::spawn(async move {
+                                        let _ = timeout(
+                                            Duration::from_millis(250),
+                                            me.send_message(
+                                                packet.source,
+                                                PeerToPeerMessage::Handshake,
+                                            ),
+                                        )
+                                        .await;
+                                    });
+                                } else {
+                                    // Store the non handshake message
+                                    let _ = self
+                                        .inbox
+                                        .write()
+                                        .await
+                                        .get_or_insert_mut(packet.source, StaticRb::default)
+                                        .push(message);
                                 }
-                                Err(_) => todo!(),
                             }
-                        } else {
-                            log::warn!(
-                                "Remote tried to speak out of turn. Discarding their message"
-                            );
+                            Err(_) => todo!(),
                         }
-
-                        log::trace!("Packet from {} did not result in a message likely due to it being a handshake related message", packet.source);
                     }
                 }
             // Transport suffered a fatal error and probably closed
@@ -313,12 +310,11 @@ impl P2PCommunicator {
                 let mut noise_lock = self.noise_cache.write().await;
 
                 let noise = noise_lock
-                    .get_or_insert_mut(destination, || Noise::new(&self.private_key, true));
+                    .get_or_insert_mut(destination, || Noise::new(self.private_key.clone()));
 
                 if noise.is_transport_capable() {
-                    let (pre_encryption_transformation, message) = noise
-                        .try_encrypt(&self.private_key, message.clone())
-                        .unwrap();
+                    let (pre_encryption_transformation, message) =
+                        noise.try_encrypt(message.clone()).unwrap();
 
                     self.route_packet(RouteWeaverPacket {
                         source: self.public_key,
@@ -334,9 +330,8 @@ impl P2PCommunicator {
                 if noise.is_my_turn() {
                     log::info!("Trying to send message to {}", destination);
 
-                    let (pre_encryption_transformation, message) = noise
-                        .try_encrypt(&self.private_key, PeerToPeerMessage::Handshake)
-                        .unwrap();
+                    let (pre_encryption_transformation, message) =
+                        noise.try_encrypt(PeerToPeerMessage::Handshake).unwrap();
 
                     self.route_packet(RouteWeaverPacket {
                         source: self.public_key,

@@ -1,9 +1,7 @@
 use std::{fmt::Debug, pin::Pin, sync::Arc, time::Duration};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::{
-    address::TransportAddress, error::RouteWeaverError, message::SERIALIZED_PACKET_SIZE_MAX,
-};
+use crate::{address::TransportAddress, error::RouteWeaverError};
 
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync + Debug + 'static {
@@ -35,6 +33,6 @@ pub trait TransportConnection: Send + Sync + Debug + AsyncWrite + AsyncRead {
     }
 
     fn recommended_packet_size(&self) -> usize {
-        SERIALIZED_PACKET_SIZE_MAX
+        0
     }
 }

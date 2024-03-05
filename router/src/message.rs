@@ -1,25 +1,61 @@
-use crate::{
-    address::TransportAddress, error::RouteWeaverError, noise::PublicKey,
-    transport::TransportConnection, wire_decode, wire_encode, wire_measure_size,
-};
 use arrayvec::ArrayVec;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use bincode::Options;
+use once_cell::sync::Lazy;
+use route_weaver_common::{
+    address::TransportAddress, error::RouteWeaverError, noise::PublicKey, router::ApplicationId,
+    transport::TransportConnection,
+};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{mem::size_of, pin::Pin};
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio_util::{
     bytes::Buf,
     codec::{Decoder, Encoder, FramedRead, FramedWrite},
 };
-use zeroize::ZeroizeOnDrop;
 
-#[derive(Clone, Debug, Serialize, Deserialize, ZeroizeOnDrop)]
-pub struct ApplicationId(pub [u8; 32]);
+// Rust doesn't have autotyping for statics moment
+#[allow(clippy::type_complexity)]
+pub static BINCODE_CONFIG: Lazy<
+    bincode::config::WithOtherLimit<
+        bincode::config::WithOtherIntEncoding<
+            bincode::config::WithOtherEndian<
+                bincode::config::WithOtherTrailing<
+                    bincode::DefaultOptions,
+                    bincode::config::AllowTrailing,
+                >,
+                bincode::config::BigEndian,
+            >,
+            bincode::config::FixintEncoding,
+        >,
+        bincode::config::Bounded,
+    >,
+> = Lazy::new(|| {
+    bincode::DefaultOptions::default()
+        .allow_trailing_bytes()
+        .with_big_endian()
+        .with_fixint_encoding()
+        .with_limit(SERIALIZED_PACKET_SIZE_MAX as u64)
+});
 
-impl From<&str> for ApplicationId {
-    fn from(value: &str) -> Self {
-        ApplicationId(Sha256::digest(value.as_bytes()).into())
-    }
+#[inline]
+pub fn wire_encode<T: Serialize>(
+    buffer: &mut Vec<u8>,
+    to_encode: &T,
+) -> Result<usize, bincode::Error> {
+    let len = wire_measure_size(to_encode)?;
+    buffer.reserve(len.saturating_sub(buffer.len()));
+    BINCODE_CONFIG.serialize_into(buffer, to_encode)?;
+    Ok(len)
+}
+
+#[inline]
+pub fn wire_decode<T: DeserializeOwned>(to_decode: &[u8]) -> Result<T, bincode::Error> {
+    BINCODE_CONFIG.deserialize(to_decode)
+}
+
+#[inline]
+pub fn wire_measure_size<T: Serialize>(to_encode: &T) -> Result<usize, bincode::Error> {
+    Ok(BINCODE_CONFIG.serialized_size(to_encode)? as usize)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -110,7 +146,8 @@ impl Decoder for PacketEncoderDecoder {
 
         match wire_decode::<RouteWeaverPacket>(src) {
             Ok(packet) => {
-                let size = wire_measure_size(&packet)?;
+                let size = wire_measure_size(&packet)
+                    .map_err(|_| RouteWeaverError::PacketDecodingError)?;
                 src.advance(size);
 
                 // Reject packets with empty messages
@@ -160,7 +197,8 @@ impl Encoder<RouteWeaverPacket> for PacketEncoderDecoder {
         dst: &mut tokio_util::bytes::BytesMut,
     ) -> Result<(), Self::Error> {
         self.working_buffer.fill(0);
-        let len = wire_encode(&mut self.working_buffer, &item)?;
+        let len =
+            wire_encode(&mut self.working_buffer, &item).expect("Packet encoding should not fail");
         dst.extend_from_slice(&self.working_buffer[..len]);
 
         Ok(())
