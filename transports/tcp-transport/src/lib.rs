@@ -4,11 +4,11 @@ use route_weaver_common::{
     transport::{Transport, TransportConnection},
 };
 use socket2::Socket;
-use std::pin::pin;
 use std::{
     net::{IpAddr, SocketAddr},
     pin::Pin,
 };
+use std::{pin::pin, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
@@ -21,7 +21,7 @@ pub struct TcpTransport {
 
 #[async_trait::async_trait]
 impl Transport for TcpTransport {
-    async fn boxed_new() -> Box<dyn Transport> {
+    async fn arced_new() -> Arc<dyn Transport> {
         let socket = Socket::new(
             socket2::Domain::IPV6,
             socket2::Type::STREAM,
@@ -33,12 +33,15 @@ impl Transport for TcpTransport {
         let _ = socket.set_only_v6(false);
         let _ = socket.set_nonblocking(true);
 
+        // Tcp is annoying like this
+        let _ = socket.set_reuse_port(true);
+
         socket
             .bind(&SocketAddr::new("::".parse().unwrap(), 3434).into())
             .unwrap();
         socket.listen(5).unwrap();
 
-        Box::new(Self {
+        Arc::new(Self {
             socket: TcpListener::from_std(std::net::TcpListener::from(socket)).unwrap(),
         })
     }
@@ -48,7 +51,7 @@ impl Transport for TcpTransport {
     }
 
     async fn connect(
-        &mut self,
+        &self,
         address: TransportAddress,
     ) -> Result<Pin<Box<dyn TransportConnection>>, RouteWeaverError> {
         let addr = SocketAddr::new(address.data.parse().unwrap(), 3434);
@@ -62,7 +65,7 @@ impl Transport for TcpTransport {
     }
 
     async fn accept(
-        &mut self,
+        &self,
     ) -> Result<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>), RouteWeaverError>
     {
         self.socket

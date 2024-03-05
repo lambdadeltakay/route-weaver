@@ -1,5 +1,7 @@
 /target/
 Cargo.lock
 /router.toml
+/remote.toml
 /perf.*
 /*.svg
+/personal-test.sh

@@ -11,6 +11,18 @@ pub struct TransportAddress {
     pub port: Option<u16>,
 }
 
+impl TransportAddress {
+    // For comparing addresses so we don't connect too many times
+    pub fn without_port(&self) -> Self {
+        Self {
+            address_type: self.address_type.clone(),
+            protocol: self.protocol.clone(),
+            data: self.data.clone(),
+            port: None,
+        }
+    }
+}
+
 impl FromStr for TransportAddress {
     type Err = RouteWeaverError;
 

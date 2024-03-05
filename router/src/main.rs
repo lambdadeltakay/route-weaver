@@ -1,3 +1,4 @@
+mod connection_manager;
 mod gateway;
 mod p2p;
 
@@ -7,15 +8,15 @@ use clap::Parser;
 use log::LevelFilter;
 use p2p::P2PCommunicatorBuilder;
 use route_weaver_common::{
-    message::{PeerToPeerMessage, PreEncryptionTransformation, RouteWeaverPacket},
+    address::TransportAddress,
+    message::PeerToPeerMessage,
     noise::{PrivateKey, PublicKey},
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
-use simple_logger::SimpleLogger;
-use std::{collections::HashSet, path::PathBuf};
-use tokio::fs::read_to_string;
+use std::{collections::HashSet, path::PathBuf, time::Duration};
+use tokio::{fs::read_to_string, time::sleep};
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
@@ -26,6 +27,7 @@ pub struct MainRouterConfig {
     private_key: PrivateKey,
     #[serde_as(as = "DisplayFromStr")]
     public_key: PublicKey,
+    seed_node: TransportAddress,
 }
 
 #[derive(Parser)]
@@ -37,25 +39,33 @@ pub struct Arguments {
 
 #[tokio::main]
 async fn main() {
-    SimpleLogger::new()
-        .with_level(LevelFilter::Trace)
-        // Shut up tokio
-        .with_module_level("tracing", LevelFilter::Info)
-        .with_module_level("runtime", LevelFilter::Info)
-        .with_module_level("tokio", LevelFilter::Info)
-        .with_colors(true)
-        .init()
+    let args = Arguments::parse();
+    let config_path = args.config_path;
+    let config = read_to_string(config_path).await.unwrap();
+    let config: MainRouterConfig = toml::from_str(&config).expect("Failed to parse router config");
+
+    let public_key_string = config.public_key.to_string();
+
+    fern::Dispatch::new()
+        .format(move |out, message, record| {
+            out.finish(format_args!(
+                "[{} {} {}] {} {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                record.target(),
+                public_key_string,
+                message
+            ))
+        })
+        .level(log::LevelFilter::Trace)
+        .chain(std::io::stdout())
+        .apply()
         .unwrap();
-
-    // console_subscriber::init();
-
-    let config: MainRouterConfig =
-        toml::from_str(&read_to_string("router.toml").await.unwrap()).unwrap();
 
     let mut router = P2PCommunicatorBuilder::default()
         .add_public_key(config.public_key)
         .add_private_key(config.private_key)
-        .add_seed_node("/ip/127.0.0.1/tcp/3434".parse().unwrap());
+        .add_seed_node(config.seed_node);
 
     #[cfg(feature = "tcp-transport")]
     if config.enabled_transports.contains("tcp") {
@@ -73,17 +83,20 @@ async fn main() {
     }
 
     let router = router.build().await;
+    let remote = "1B86836D92CF67B3B9146827CEEB06B8EF8F3607DE5F02C67E095F2D19A691DB"
+        .parse()
+        .unwrap();
 
     loop {
         let router = router.clone();
-        let sample_key = PublicKey([0; 32]);
 
-        router
-            .send_message(
-                sample_key,
-                PeerToPeerMessage::StartApplicationData { id: "ping".into() },
-            )
-            .await;
+        if config.public_key != remote {
+            router
+                .send_message(remote, PeerToPeerMessage::Handshake)
+                .await;
+        }
+
+        sleep(Duration::from_secs(1)).await;
     }
 
     /*

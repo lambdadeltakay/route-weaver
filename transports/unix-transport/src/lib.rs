@@ -3,8 +3,11 @@ use route_weaver_common::{
     error::RouteWeaverError,
     transport::{Transport, TransportConnection},
 };
-use std::pin::{pin, Pin};
 use std::{path::PathBuf, task::Poll};
+use std::{
+    pin::{pin, Pin},
+    sync::Arc,
+};
 use tokio::{
     fs::remove_file,
     io::{AsyncRead, AsyncWrite},
@@ -18,13 +21,13 @@ pub struct UnixTransport {
 
 #[async_trait::async_trait]
 impl Transport for UnixTransport {
-    async fn boxed_new() -> Box<dyn Transport> {
+    async fn arced_new() -> Arc<dyn Transport> {
         let tmpdir = std::env::temp_dir();
         let socket_path = tmpdir.join(env!("CARGO_CRATE_NAME"));
 
         let _ = remove_file(socket_path.clone()).await;
 
-        Box::new(Self {
+        Arc::new(Self {
             socket: UnixListener::bind(socket_path).unwrap(),
         })
     }
@@ -34,7 +37,7 @@ impl Transport for UnixTransport {
     }
 
     async fn connect(
-        &mut self,
+        &self,
         address: TransportAddress,
     ) -> Result<Pin<Box<dyn TransportConnection>>, RouteWeaverError> {
         let path = address
@@ -51,7 +54,7 @@ impl Transport for UnixTransport {
     }
 
     async fn accept(
-        &mut self,
+        &self,
     ) -> Result<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>), RouteWeaverError>
     {
         self.socket

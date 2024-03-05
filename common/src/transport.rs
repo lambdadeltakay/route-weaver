@@ -1,4 +1,4 @@
-use std::{fmt::Debug, pin::Pin, time::Duration};
+use std::{fmt::Debug, pin::Pin, sync::Arc, time::Duration};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
@@ -7,7 +7,7 @@ use crate::{
 
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync + Debug + 'static {
-    async fn boxed_new() -> Box<dyn Transport>
+    async fn arced_new() -> Arc<dyn Transport>
     where
         Self: Sized;
     fn get_protocol_string() -> &'static str
@@ -15,14 +15,14 @@ pub trait Transport: Send + Sync + Debug + 'static {
         Self: Sized;
 
     async fn connect(
-        &mut self,
+        &self,
         _address: TransportAddress,
     ) -> Result<Pin<Box<dyn TransportConnection>>, RouteWeaverError> {
         Err(RouteWeaverError::UnsupportedOperationRequestedOnTransport)
     }
 
     async fn accept(
-        &mut self,
+        &self,
     ) -> Result<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>), RouteWeaverError>
     {
         Err(RouteWeaverError::UnsupportedOperationRequestedOnTransport)
