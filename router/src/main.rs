@@ -4,7 +4,7 @@ mod noise;
 mod p2p;
 
 use clap::Parser;
-use fern::colors::ColoredLevelConfig;
+use log::LevelFilter;
 use p2p::P2PCommunicatorBuilder;
 use route_weaver_common::{
     address::TransportAddress,
@@ -38,28 +38,22 @@ pub struct Arguments {
 
 #[tokio::main]
 async fn main() {
-    // console_subscriber::init();
+    let console_appender = log4rs::append::console::ConsoleAppender::builder().build();
+    let config = log4rs::Config::builder()
+        .appender(log4rs::config::Appender::builder().build("console", Box::new(console_appender)))
+        .build(
+            log4rs::config::Root::builder()
+                .appender("console")
+                .build(LevelFilter::Warn),
+        )
+        .unwrap();
+
+    log4rs::init_config(config).unwrap();
 
     let args = Arguments::parse();
     let config_path = args.config_path;
     let config = read_to_string(config_path).await.unwrap();
     let config: MainRouterConfig = toml::from_str(&config).expect("Failed to parse router config");
-
-    let colors = ColoredLevelConfig::default();
-    fern::Dispatch::new()
-        .format(move |out, message, record| {
-            out.finish(format_args!(
-                "[{} {} {}] {}",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                colors.color(record.level()),
-                record.target(),
-                message
-            ))
-        })
-        .level(log::LevelFilter::Trace)
-        .chain(std::io::stdout())
-        .apply()
-        .unwrap();
 
     let mut router = P2PCommunicatorBuilder::default()
         .add_public_key(config.public_key)

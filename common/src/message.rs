@@ -29,7 +29,7 @@ pub static BINCODE_CONFIG: Lazy<
                 >,
                 bincode::config::BigEndian,
             >,
-            bincode::config::FixintEncoding,
+            bincode::config::VarintEncoding,
         >,
         bincode::config::Bounded,
     >,
@@ -37,7 +37,7 @@ pub static BINCODE_CONFIG: Lazy<
     bincode::DefaultOptions::default()
         .allow_trailing_bytes()
         .with_big_endian()
-        .with_fixint_encoding()
+        .with_varint_encoding()
         .with_limit(SERIALIZED_PACKET_SIZE_MAX as u64)
 });
 
@@ -154,16 +154,6 @@ impl Decoder for PacketEncoderDecoder {
                 let size = wire_measure_size(&packet)
                     .map_err(|_| RouteWeaverError::PacketManagingFailure)?;
                 src.advance(size);
-
-                // Reject packets with empty messages
-                if packet.message.is_empty() {
-                    log::warn!(
-                        "Received an empty packet from {} to {}, discarding it",
-                        packet.source,
-                        packet.destination
-                    );
-                    return Ok(None);
-                }
 
                 log::trace!("Found a packet of size {}", size);
                 log::trace!(

@@ -1,18 +1,12 @@
 use crate::{message_socket::RouteWeaverSocket, noise::Noise};
-use arrayvec::ArrayVec;
-use clap::error;
 use dashmap::{DashMap, DashSet};
-use futures::{
-    prelude::{sink::SinkExt, Future, Sink, Stream},
-    ready,
-};
+use futures::prelude::{sink::SinkExt, Future};
 use hashlink::LruCache;
 use rand::prelude::{IteratorRandom, SeedableRng, SmallRng};
 use ringbuf::Rb;
 use ringbuf::StaticRb;
 use route_weaver_common::{
     address::TransportAddress,
-    error::RouteWeaverError,
     message::{PeerToPeerMessage, RouteWeaverPacket},
     noise::{PrivateKey, PublicKey},
     router::ApplicationId,
@@ -20,26 +14,21 @@ use route_weaver_common::{
 };
 use sha2::Digest;
 use sha2::Sha256;
-use snow::types::Hash;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    num::NonZeroUsize,
+    collections::{BTreeSet, HashMap},
     pin::Pin,
     sync::Arc,
-    task::Poll,
     time::Duration,
 };
+use tokio::{sync::mpsc, time::interval};
 use tokio::{
-    io::split,
     sync::{
         mpsc::{Receiver, Sender},
-        Mutex, RwLock,
+        RwLock,
     },
-    task::yield_now,
-    time::{sleep, timeout},
+    time::timeout,
 };
-use tokio::{sync::mpsc, time::interval};
-use tokio_stream::{StreamExt, StreamMap};
+use tokio_stream::StreamExt;
 
 #[derive(Default)]
 pub struct P2PCommunicatorBuilder {
@@ -94,28 +83,33 @@ impl P2PCommunicatorBuilder {
             )),
             transports,
             connection_tracker: DashSet::new(),
+            writers: DashMap::new(),
             listeners: DashMap::new(),
         });
 
-        let (packet_router_pipe_sender, packet_router_pipe_receiver) = mpsc::channel(1000);
-        let (transport_packet_pipe_sender, transport_packet_pipe_receiver) = mpsc::channel(1000);
-
-        for transport in communicator.transports.values() {
-            tokio::spawn(
-                communicator.clone().connection_accepter_task(
-                    transport.clone(),
-                    transport_packet_pipe_sender.clone(),
-                ),
-            );
-        }
+        let (packet_router_pipe_sender, packet_router_pipe_receiver) = mpsc::channel(10000);
+        let (transport_packet_pipe_sender, transport_packet_pipe_receiver) = mpsc::channel(10000);
 
         tokio::spawn(
             communicator
                 .clone()
-                .occasional_gateway_contactor_task(transport_packet_pipe_sender.clone()),
+                .packet_router_task(packet_router_pipe_receiver),
         );
 
-        let (message_pipe_sender, message_pipe_receiver) = mpsc::channel(1000);
+        for transport in communicator.transports.values() {
+            tokio::spawn(communicator.clone().connection_accepter_task(
+                transport.clone(),
+                transport_packet_pipe_sender.clone(),
+                packet_router_pipe_sender.clone(),
+            ));
+        }
+
+        tokio::spawn(communicator.clone().occasional_gateway_contactor_task(
+            transport_packet_pipe_sender.clone(),
+            packet_router_pipe_sender.clone(),
+        ));
+
+        let (message_pipe_sender, message_pipe_receiver) = mpsc::channel(10000);
 
         tokio::spawn(communicator.clone().packet_sorter_task(
             message_pipe_sender,
@@ -126,7 +120,7 @@ impl P2PCommunicatorBuilder {
         tokio::spawn(
             communicator
                 .clone()
-                .packet_handler_task(message_pipe_receiver),
+                .message_handler_task(message_pipe_receiver, packet_router_pipe_sender),
         );
 
         communicator
@@ -142,6 +136,7 @@ pub struct RouteWeaverTransport {
     noise: RwLock<Noise>,
     transports: HashMap<&'static str, Arc<dyn Transport>>,
     known_gateways: RwLock<Box<StaticRb<TransportAddress, 100>>>,
+    writers: DashMap<TransportAddress, mpsc::Sender<RouteWeaverPacket>>,
     listeners: DashMap<ApplicationId, DashMap<PublicKey, RouteWeaverSocketHandle>>,
     connection_tracker: DashSet<TransportAddress>,
 }
@@ -159,10 +154,54 @@ impl RouteWeaverTransport {
         todo!()
     }
 
+    async fn packet_router_task(
+        self: Arc<Self>,
+        mut packet_router_pipe: mpsc::Receiver<RouteWeaverPacket>,
+    ) {
+        loop {
+            if let Some(packet) = packet_router_pipe.recv().await {
+                // TODO: make actual routing algorithm
+                self.writers
+                    .iter()
+                    .next()
+                    .unwrap()
+                    .send(packet)
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    async fn packet_sender_task(
+        self: Arc<Self>,
+        address: TransportAddress,
+        mut writer: Pin<Box<dyn TransportConnectionWriter>>,
+        // Receives packets that need to be sent
+        mut writer_pipe: mpsc::Receiver<RouteWeaverPacket>,
+        // For sending packets back that failed to send
+        packet_router_pipe: mpsc::Sender<RouteWeaverPacket>,
+    ) {
+        loop {
+            if let Some(packet) = writer_pipe.recv().await {
+                match writer.send(packet.clone()).await {
+                    Ok(_) => {
+                        log::trace!("Sent packet to: {}", address);
+                    }
+                    Err(err) => {
+                        log::error!("Error writing to transport: {}", err);
+                        packet_router_pipe.send(packet).await.unwrap();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     async fn packet_listener_task(
         self: Arc<Self>,
         address: TransportAddress,
         mut reader: Pin<Box<dyn TransportConnectionReader>>,
+        // Sends that need to be evaluated
         transport_packet_pipe: mpsc::Sender<RouteWeaverPacket>,
     ) {
         self.connection_tracker.insert(address.clone());
@@ -174,7 +213,7 @@ impl RouteWeaverTransport {
                         transport_packet_pipe.send(packet).await.unwrap();
                     }
                     Err(err) => {
-                        log::error!("Error reading from transport: {}", err);
+                        log::error!("Error reading from transport: {}, inputting packet again for rerouting", err);
                         break;
                     }
                 }
@@ -188,10 +227,22 @@ impl RouteWeaverTransport {
         self: Arc<Self>,
         transport: Arc<dyn Transport>,
         transport_packet_pipe: mpsc::Sender<RouteWeaverPacket>,
+        packet_router_pipe: mpsc::Sender<RouteWeaverPacket>,
     ) {
         loop {
             if let Ok(((reader, writer), Some(address))) = transport.accept().await {
                 log::info!("Accepted connection from {}", address);
+
+                let (writer_pipe_sender, writer_pipe_receiver) = mpsc::channel(100);
+
+                self.writers.insert(address.clone(), writer_pipe_sender);
+
+                tokio::spawn(self.clone().packet_sender_task(
+                    address.clone(),
+                    writer,
+                    writer_pipe_receiver,
+                    packet_router_pipe.clone(),
+                ));
 
                 tokio::spawn(self.clone().packet_listener_task(
                     address,
@@ -205,6 +256,7 @@ impl RouteWeaverTransport {
     async fn occasional_gateway_contactor_task(
         self: Arc<Self>,
         transport_packet_pipe: mpsc::Sender<RouteWeaverPacket>,
+        packet_router_pipe: mpsc::Sender<RouteWeaverPacket>,
     ) {
         let mut rng = SmallRng::from_entropy();
         let mut interval = interval(Duration::from_secs(30));
@@ -230,6 +282,17 @@ impl RouteWeaverTransport {
                 {
                     log::info!("Connected to {}", address);
 
+                    let (writer_pipe_sender, writer_pipe_receiver) = mpsc::channel(100);
+
+                    self.writers.insert(address.clone(), writer_pipe_sender);
+
+                    tokio::spawn(self.clone().packet_sender_task(
+                        address.clone(),
+                        writer,
+                        writer_pipe_receiver,
+                        packet_router_pipe.clone(),
+                    ));
+
                     tokio::spawn(self.clone().packet_listener_task(
                         address,
                         reader,
@@ -244,9 +307,10 @@ impl RouteWeaverTransport {
         }
     }
 
-    async fn packet_handler_task(
+    async fn message_handler_task(
         self: Arc<Self>,
         mut message_pipe: mpsc::Receiver<(PublicKey, PeerToPeerMessage)>,
+        packet_router_pipe: mpsc::Sender<RouteWeaverPacket>,
     ) {
         let mut application_data_recv_state = LruCache::new(100);
 
@@ -264,7 +328,7 @@ impl RouteWeaverTransport {
                 PeerToPeerMessage::ApplicationData { id, index, data } => {
                     if let Some(state) = application_data_recv_state.get_mut(&(public_key, id)) {
                         state.hasher.update(&data);
-                        state.counts.insert(index, data);
+                        state.counts[index as usize] = Some(data);
                     }
                 }
                 PeerToPeerMessage::EndApplicationData {
@@ -282,8 +346,8 @@ impl RouteWeaverTransport {
                         if final_sha256 != sha256 {
                             log::warn!("Application data segment sent is corrupted");
 
-                            for x in 0..=total_sent {
-                                if !state.counts.contains_key(&x) {
+                            for x in 0..total_sent {
+                                if state.counts[x as usize].is_none() {
                                     missing_indexes.insert(x);
                                 }
                             }
@@ -296,7 +360,20 @@ impl RouteWeaverTransport {
                                 id,
                                 missing_indexes,
                             };
+
+                            let packet = self
+                                .noise
+                                .write()
+                                .await
+                                .try_encrypt(response, public_key)
+                                .unwrap();
+                            packet_router_pipe.send(packet).await.unwrap();
+                        } else {
+                            let response = PeerToPeerMessage::ApplicationDataOk { id };
+                            for application_data in state.counts {}
                         }
+                    } else {
+                        log::warn!("Received EndApplicationData without StartApplicationData");
                     }
                 }
                 PeerToPeerMessage::ApplicationDataProblem {
@@ -321,11 +398,18 @@ impl RouteWeaverTransport {
             if let Some(packet) = transport_packet_pipe.recv().await {
                 let mut noise_lock = self.noise.write().await;
 
-                if noise_lock.public_key != packet.destination {
+                if packet.message.is_empty() {
+                    log::warn!("Dropping empty packet from {}", packet.source);
+                } else if packet.source == packet.destination {
+                    log::warn!(
+                        "Packet from {} set to route back to destination. Rejecting such packet",
+                        packet.source
+                    );
+                } else if noise_lock.public_key != packet.destination {
                     log::trace!("Rerouting packet to {}", packet.destination);
                     packet_router_pipe.send(packet).await.unwrap();
                 } else {
-                    log::info!("Received packet from {}", packet.source);
+                    log::trace!("Received packet from {}", packet.source);
 
                     match noise_lock.try_decrypt(packet.clone()) {
                         Ok(message) => {
@@ -341,8 +425,20 @@ impl RouteWeaverTransport {
     }
 }
 
-#[derive(Default)]
 pub struct ApplicationDataRecvStateEntry {
     hasher: Sha256,
-    counts: BTreeMap<u8, Vec<u8>>,
+    counts: [Option<Vec<u8>>; 256],
+}
+
+impl ApplicationDataRecvStateEntry {
+    const DEFAULT_VALUE: Option<Vec<u8>> = None;
+}
+
+impl Default for ApplicationDataRecvStateEntry {
+    fn default() -> Self {
+        Self {
+            hasher: Sha256::new(),
+            counts: [Self::DEFAULT_VALUE; 256],
+        }
+    }
 }
