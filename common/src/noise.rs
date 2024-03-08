@@ -1,14 +1,10 @@
-use std::{fmt::Display, mem::size_of, str::FromStr};
+use std::{fmt::Display, str::FromStr};
 
 use data_encoding::HEXLOWER_PERMISSIVE;
-use either::{
-    for_both,
-    Either::{self, Left, Right},
-};
-use once_cell::sync::Lazy;
+
 use serde::{Deserialize, Serialize};
-use snow::{params::NoiseParams, Builder, HandshakeState, TransportState};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+
+use zeroize::ZeroizeOnDrop;
 
 use crate::error::RouteWeaverError;
 

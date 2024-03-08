@@ -1,18 +1,18 @@
 use route_weaver_common::{
     address::TransportAddress,
     error::RouteWeaverError,
-    transport::{Transport, TransportConnection},
+    transport::{
+        GenericBincodeConnectionReader, GenericBincodeConnectionWriter, Transport,
+        TransportConnectionReader, TransportConnectionWriter,
+    },
 };
 use socket2::Socket;
+use std::sync::Arc;
 use std::{
     net::{IpAddr, SocketAddr},
     pin::Pin,
 };
-use std::{pin::pin, sync::Arc};
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    net::{TcpListener, TcpStream},
-};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 #[derive(Debug)]
 pub struct TcpTransport {
@@ -29,12 +29,8 @@ impl Transport for TcpTransport {
         )
         .unwrap();
 
-        let _ = socket.set_cloexec(true);
-        let _ = socket.set_only_v6(false);
-        let _ = socket.set_nonblocking(true);
-
-        // Tcp is annoying like this
-        let _ = socket.set_reuse_port(true);
+        socket.set_only_v6(false).unwrap();
+        socket.set_nonblocking(true).unwrap();
 
         socket
             .bind(&SocketAddr::new("::".parse().unwrap(), 3434).into())
@@ -46,49 +42,78 @@ impl Transport for TcpTransport {
         })
     }
 
-    fn get_protocol_string() -> &'static str {
+    fn get_protocol_string(&self) -> &'static str {
         "tcp"
     }
 
     async fn connect(
         &self,
         address: TransportAddress,
-    ) -> Result<Pin<Box<dyn TransportConnection>>, RouteWeaverError> {
+    ) -> Result<
+        (
+            Pin<Box<dyn TransportConnectionReader>>,
+            Pin<Box<dyn TransportConnectionWriter>>,
+        ),
+        RouteWeaverError,
+    > {
         let addr = SocketAddr::new(address.data.parse().unwrap(), 3434);
 
         TcpStream::connect(addr)
             .await
             .map(|stream| {
-                Box::pin(TcpTransportConnection { stream }) as Pin<Box<dyn TransportConnection>>
+                let (read, write) = stream.into_split();
+
+                (
+                    GenericBincodeConnectionReader::new(read)
+                        as Pin<Box<dyn TransportConnectionReader>>,
+                    GenericBincodeConnectionWriter::new(write)
+                        as Pin<Box<dyn TransportConnectionWriter>>,
+                )
             })
             .map_err(RouteWeaverError::Custom)
     }
 
     async fn accept(
         &self,
-    ) -> Result<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>), RouteWeaverError>
-    {
+    ) -> Result<
+        (
+            (
+                Pin<Box<dyn TransportConnectionReader>>,
+                Pin<Box<dyn TransportConnectionWriter>>,
+            ),
+            Option<TransportAddress>,
+        ),
+        RouteWeaverError,
+    > {
         self.socket
             .accept()
             .await
             .map(|(stream, address)| {
+                let (read, write) = stream.into_split();
                 (
-                    Box::pin(TcpTransportConnection { stream })
-                        as Pin<Box<dyn TransportConnection>>,
+                    (
+                        GenericBincodeConnectionReader::new(read)
+                            as Pin<Box<dyn TransportConnectionReader>>,
+                        GenericBincodeConnectionWriter::new(write)
+                            as Pin<Box<dyn TransportConnectionWriter>>,
+                    ),
                     {
                         match address.ip() {
                             IpAddr::V4(ip) => Some(TransportAddress {
-                                address_type: "ip".to_string(),
-                                protocol: "tcp".to_string(),
-                                data: ip.to_string(),
+                                address_type: "ip".try_into().unwrap(),
+                                protocol: self.get_protocol_string().try_into().unwrap(),
+                                data: ip.to_string().as_str().try_into().unwrap(),
                                 port: Some(address.port()),
                             }),
                             IpAddr::V6(ip) => Some(TransportAddress {
-                                address_type: "ip".to_string(),
-                                protocol: "tcp".to_string(),
+                                address_type: "ip".try_into().unwrap(),
+                                protocol: self.get_protocol_string().try_into().unwrap(),
                                 data: ip
                                     .to_ipv4_mapped()
-                                    .map_or_else(|| ip.to_string(), |ip| ip.to_string()),
+                                    .map_or_else(|| ip.to_string(), |ip| ip.to_string())
+                                    .as_str()
+                                    .try_into()
+                                    .unwrap(),
                                 port: Some(address.port()),
                             }),
                         }
@@ -96,46 +121,5 @@ impl Transport for TcpTransport {
                 )
             })
             .map_err(RouteWeaverError::Custom)
-    }
-}
-
-#[derive(Debug)]
-struct TcpTransportConnection {
-    stream: TcpStream,
-}
-
-impl TransportConnection for TcpTransportConnection {}
-
-impl AsyncRead for TcpTransportConnection {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        pin!(&mut self.stream).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for TcpTransportConnection {
-    fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        pin!(&mut self.stream).poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        pin!(&mut self.stream).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        pin!(&mut self.stream).poll_shutdown(cx)
     }
 }

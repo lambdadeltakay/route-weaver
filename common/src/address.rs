@@ -1,13 +1,15 @@
+use arrayvec::ArrayString;
+use serde::{Deserialize, Serialize};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use std::{fmt::Display, str::FromStr};
 
 use crate::error::RouteWeaverError;
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, SerializeDisplay, DeserializeFromStr)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportAddress {
-    pub address_type: String,
-    pub protocol: String,
-    pub data: String,
+    pub address_type: ArrayString<8>,
+    pub protocol: ArrayString<8>,
+    pub data: ArrayString<128>,
     pub port: Option<u16>,
 }
 
@@ -15,9 +17,9 @@ impl TransportAddress {
     // For comparing addresses so we don't connect too many times
     pub fn without_port(&self) -> Self {
         Self {
-            address_type: self.address_type.clone(),
-            protocol: self.protocol.clone(),
-            data: self.data.clone(),
+            address_type: self.address_type,
+            protocol: self.protocol,
+            data: self.data,
             port: None,
         }
     }
@@ -31,18 +33,14 @@ impl FromStr for TransportAddress {
 
         parts.next().ok_or(RouteWeaverError::AddressFailedToParse)?;
 
-        let address_type = parts
-            .next()
-            .ok_or(RouteWeaverError::AddressFailedToParse)?
-            .to_string();
-        let data = parts
-            .next()
-            .ok_or(RouteWeaverError::AddressFailedToParse)?
-            .to_string();
-        let protocol = parts
-            .next()
-            .ok_or(RouteWeaverError::AddressFailedToParse)?
-            .to_string();
+        let address_type =
+            ArrayString::from(parts.next().ok_or(RouteWeaverError::AddressFailedToParse)?)
+                .map_err(|_| RouteWeaverError::AddressFailedToParse)?;
+        let data = ArrayString::from(parts.next().ok_or(RouteWeaverError::AddressFailedToParse)?)
+            .map_err(|_| RouteWeaverError::AddressFailedToParse)?;
+        let protocol =
+            ArrayString::from(parts.next().ok_or(RouteWeaverError::AddressFailedToParse)?)
+                .map_err(|_| RouteWeaverError::AddressFailedToParse)?;
 
         let port = if let Some(port) = parts.next() {
             Some(

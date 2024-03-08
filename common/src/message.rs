@@ -1,16 +1,20 @@
+use std::{
+    collections::{BTreeSet, HashSet},
+    mem::size_of,
+};
+
 use arrayvec::ArrayVec;
 use bincode::Options;
 use once_cell::sync::Lazy;
-use route_weaver_common::{
-    address::TransportAddress, error::RouteWeaverError, noise::PublicKey, router::ApplicationId,
-    transport::TransportConnection,
-};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{mem::size_of, pin::Pin};
-use tokio::io::{ReadHalf, WriteHalf};
 use tokio_util::{
     bytes::Buf,
-    codec::{Decoder, Encoder, FramedRead, FramedWrite},
+    codec::{Decoder, Encoder},
+};
+use zeroize::ZeroizeOnDrop;
+
+use crate::{
+    address::TransportAddress, error::RouteWeaverError, noise::PublicKey, router::ApplicationId,
 };
 
 // Rust doesn't have autotyping for statics moment
@@ -65,33 +69,34 @@ pub enum PeerToPeerMessage {
     Handshake,
     /// Generic response message
     Confirm,
+    /// Generic negative response message
+    Deny,
     /// Asking if its ok to transmit some data over
     /// Valid response messages: OkToReceiveApplicationData
     StartApplicationData {
         id: ApplicationId,
     },
-    /// It's ok to send data as we have a internal plugin listening for this application
-    OkToReceiveApplicationData {
-        id: ApplicationId,
-    },
-    /// It's not ok to start a application data stream
-    ApplicationDataRefused {
-        id: ApplicationId,
-    },
     /// The application data coming along
     /// Valid response messages: Confirm
     ApplicationData {
+        id: ApplicationId,
+        index: u8,
         data: Vec<u8>,
-        index: u32,
     },
     /// End the stream giving a blake2 hash of the data sent in ApplicationData chunks
     /// Valid response messages: Confirm, ApplicationDataMissing
     EndApplicationData {
-        hash: [u8; 32],
-        send_count: u32,
+        id: ApplicationId,
+        total_sent: u8,
+        sha256: [u8; 32],
     },
-    ApplicationDataMissing {
-        missing_indexes: Vec<u32>,
+    ApplicationDataOk {
+        id: ApplicationId,
+    },
+    /// Send when the hash is bad. Also includes possible missing indexes
+    ApplicationDataProblem {
+        id: ApplicationId,
+        missing_indexes: BTreeSet<u8>,
     },
     RequestPeerList,
     PeerList {
@@ -99,7 +104,7 @@ pub enum PeerToPeerMessage {
     },
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 /// What sort of pre encryption transformation we used
 /// This also inadvertantly creates a magic byte for the packet filtering out a lot of totally random messages
 pub enum PreEncryptionTransformation {
@@ -107,7 +112,7 @@ pub enum PreEncryptionTransformation {
     Lz4,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RouteWeaverPacket {
     pub source: PublicKey,
     pub destination: PublicKey,
@@ -121,7 +126,7 @@ pub const MAX_NOISE_MESSAGE_LENGTH: usize = u16::MAX as usize - 128;
 /// I have no clue how noise actually looks like in binary format so we will do this
 pub const SERIALIZED_PACKET_SIZE_MAX: usize = (size_of::<PublicKey>() * 2) + u16::MAX as usize * 2;
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, ZeroizeOnDrop)]
 pub struct PacketEncoderDecoder {
     working_buffer: Vec<u8>,
 }
@@ -147,7 +152,7 @@ impl Decoder for PacketEncoderDecoder {
         match wire_decode::<RouteWeaverPacket>(src) {
             Ok(packet) => {
                 let size = wire_measure_size(&packet)
-                    .map_err(|_| RouteWeaverError::PacketDecodingError)?;
+                    .map_err(|_| RouteWeaverError::PacketManagingFailure)?;
                 src.advance(size);
 
                 // Reject packets with empty messages
@@ -176,9 +181,9 @@ impl Decoder for PacketEncoderDecoder {
             }
             Err(_) => {
                 if src.len() > SERIALIZED_PACKET_SIZE_MAX {
-                    // Drop the rest of the buffer
-                    src.advance(SERIALIZED_PACKET_SIZE_MAX.min(src.len()));
-                    Ok(None)
+                    log::error!("Current buffer is too large to be a packet");
+
+                    Err(RouteWeaverError::PacketManagingFailure)
                 } else {
                     // Packet could be valid but it just hasn't had enough coming in to be deserializable yet
                     Ok(None)
@@ -204,9 +209,3 @@ impl Encoder<RouteWeaverPacket> for PacketEncoderDecoder {
         Ok(())
     }
 }
-
-pub type TransportConnectionWriteFramer =
-    FramedWrite<WriteHalf<Pin<Box<dyn TransportConnection>>>, PacketEncoderDecoder>;
-
-pub type TransportConnectionReadFramer =
-    FramedRead<ReadHalf<Pin<Box<dyn TransportConnection>>>, PacketEncoderDecoder>;

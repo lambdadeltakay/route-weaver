@@ -14,8 +14,12 @@ serde = { version = "1.0", features = ["derive"] }
 snow = { workspace = true }
 either = "1.10"
 async-trait = "0.1"
-sha2 = "0.10"
 once_cell = "1.19"
 data-encoding = "2.5"
 serde_with = { workspace = true }
 thiserror = "1.0"
+bincode = "1.3"
+log = { workspace = true }
+futures = "0.3"
+arrayvec = { workspace = true }
+sha2 = { workspace = true }

@@ -9,6 +9,5 @@ license = "GPL-3.0"
 [dependencies]
 route-weaver-common = { path = "../../common" }
 tokio = { version = "1.36", features = ["net", "fs"] }
-tokio-util = { version = "0.7", features = ["codec"] }
 async-trait = "0.1"
 log = { workspace = true }

@@ -18,29 +18,32 @@ tokio = { version = "1.36", features = [
     "fs",
 ] }
 tokio-util = { version = "0.7", features = ["codec"] }
+tokio-tower = { workspace = true }
+tokio-stream = "0.1"
 futures = "0.3"
 snow = { workspace = true }
-fern = "0.6"
+fern = { version = "0.6", features = ["colored"] }
 log = { workspace = true }
 either = "1.10"
 clap = { version = "4.5", features = ["derive"] }
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
-lru = "0.12"
+hashlink = "0.9"
 ringbuf = "0.3"
 toml = "0.8"
 once_cell = { workspace = true }
 tower = { workspace = true }
-tokio-tower = { workspace = true }
 serde_with = { workspace = true }
 async-bincode = { workspace = true }
 rand = "0.8"
 chrono = "0.4"
 zeroize = { workspace = true }
-lz4_flex =  "0.11"
+lz4_flex = "0.11"
 bincode = "1.3"
-arrayvec = { version = "0.7", features = ["serde", "zeroize"] }
-
+dashmap = "5.5"
+entropy = "0.4"
+arrayvec = { workspace = true }
+sha2 = { workspace = true }
 # Multiplatform transports
 route-weaver-tcp-transport = { path = "../transports/tcp-transport", optional = true }
 

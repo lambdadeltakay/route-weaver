@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use sha2::Sha256;
 use zeroize::ZeroizeOnDrop;
-use sha2::Digest;
 
-#[derive(Clone, Debug, Serialize, Deserialize, ZeroizeOnDrop)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, ZeroizeOnDrop)]
 pub struct ApplicationId(pub [u8; 32]);
 
 impl From<&str> for ApplicationId {

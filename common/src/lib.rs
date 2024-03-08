@@ -3,3 +3,4 @@ pub mod error;
 pub mod noise;
 pub mod router;
 pub mod transport;
+pub mod message;

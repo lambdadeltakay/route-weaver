@@ -2,26 +2,26 @@ use either::{
     for_both,
     Either::{self, Left, Right},
 };
+use hashlink::LruCache;
 use once_cell::sync::Lazy;
 use route_weaver_common::{
     error::RouteWeaverError,
+    message::{
+        wire_decode, wire_encode, PeerToPeerMessage, PreEncryptionTransformation,
+        RouteWeaverPacket, SERIALIZED_PACKET_SIZE_MAX,
+    },
     noise::{PrivateKey, PublicKey},
 };
 use snow::{params::NoiseParams, HandshakeState, TransportState};
 use std::mem::size_of;
 use zeroize::Zeroize;
 
-use crate::message::{
-    wire_decode, wire_encode, PeerToPeerMessage, PreEncryptionTransformation, RouteWeaverPacket,
-    SERIALIZED_PACKET_SIZE_MAX,
-};
-
 /// Simple way to make handshakes with old clients not work without harming them
 static NOISE_PROLOGUE: Lazy<String> =
     Lazy::new(|| format!("router-weaver edition {}", env!("CARGO_PKG_VERSION_MAJOR")));
 
 static NOISE_PATTERN: Lazy<NoiseParams> =
-    Lazy::new(|| "Noise_IX_25519_ChaChaPoly_SHA256".parse().unwrap());
+    Lazy::new(|| "Noise_XX_25519_ChaChaPoly_SHA256".parse().unwrap());
 
 fn create_noise_builder<'a>() -> snow::Builder<'a> {
     snow::Builder::new(NOISE_PATTERN.clone()).prologue(NOISE_PROLOGUE.as_bytes())
@@ -52,54 +52,75 @@ fn create_initiator(key: &PrivateKey) -> HandshakeState {
 
 /// Helper to make working with noise protocol less painful
 pub struct Noise {
-    internal_noise: Option<Either<HandshakeState, TransportState>>,
+    noise: LruCache<PublicKey, Either<HandshakeState, TransportState>>,
     working_buffer: Vec<u8>,
-    private_key: PrivateKey,
+    pub private_key: PrivateKey,
+    pub public_key: PublicKey,
 }
 
 impl Noise {
-    pub fn new(private_key: PrivateKey) -> Self {
+    pub fn new(private_key: PrivateKey, public_key: PublicKey) -> Self {
         Self {
-            internal_noise: None,
+            noise: LruCache::new(1000),
             working_buffer: vec![0; SERIALIZED_PACKET_SIZE_MAX],
             private_key,
+            public_key,
         }
     }
 
-    pub fn reset(&mut self) {
-        self.internal_noise = None;
+    pub fn reset(&mut self, remote: PublicKey) {
+        self.noise.remove(&remote);
     }
 
-    pub fn is_transport_capable(&self) -> bool {
-        self.internal_noise.is_some() && self.internal_noise.as_ref().unwrap().is_right()
+    pub fn is_transport_capable(&mut self, remote: PublicKey) -> bool {
+        self.noise.contains_key(&remote) && self.noise.get(&remote).unwrap().is_right()
     }
 
-    pub fn is_my_turn(&mut self) -> bool {
+    pub fn is_my_turn(&mut self, remote: PublicKey) -> bool {
         let noise = self
-            .internal_noise
-            .get_or_insert_with(|| Left(create_initiator(&self.private_key)));
+            .noise
+            .entry(remote)
+            .or_insert_with(|| Left(create_initiator(&self.private_key)));
 
         noise.is_right() || (noise.as_ref().is_left() && noise.as_ref().unwrap_left().is_my_turn())
     }
 
-    pub fn is_their_turn(&mut self) -> bool {
+    pub fn is_their_turn(&mut self, remote: PublicKey) -> bool {
         let noise = self
-            .internal_noise
-            .get_or_insert_with(|| Left(create_responder(&self.private_key)));
+            .noise
+            .entry(remote)
+            .or_insert_with(|| Left(create_responder(&self.private_key)));
 
         noise.is_right() || (noise.as_ref().is_left() && !noise.as_ref().unwrap_left().is_my_turn())
+    }
+
+    pub fn verify_remote_public_key(&mut self, remote: PublicKey) -> Option<bool> {
+        if let Some(noise) = self.noise.get(&self.public_key) {
+            for_both!(noise, noise => noise.get_remote_static())
+                .map(|key| PublicKey(key.try_into().unwrap()) == remote)
+        } else {
+            None
+        }
     }
 
     pub fn try_encrypt(
         &mut self,
         message: PeerToPeerMessage,
-    ) -> Result<(PreEncryptionTransformation, Vec<u8>), RouteWeaverError> {
-        if self.is_transport_capable() && matches!(message, PeerToPeerMessage::Handshake) {
+        destination: PublicKey,
+    ) -> Result<RouteWeaverPacket, RouteWeaverError> {
+        if self.is_transport_capable(destination) && matches!(message, PeerToPeerMessage::Handshake)
+        {
             return Err(RouteWeaverError::HandshakeInEstablishedTunnel);
         }
 
-        if self.is_my_turn() {
-            let internel_noise = self.internal_noise.as_mut().unwrap();
+        if let Some(public_key_good) = self.verify_remote_public_key(destination) {
+            if !public_key_good {
+                return Err(RouteWeaverError::SuspiciousRemoteBehavior);
+            }
+        }
+
+        if self.is_my_turn(destination) {
+            let internel_noise = self.noise.get_mut(&destination).unwrap();
 
             // Clear buffer
             self.working_buffer.fill(0);
@@ -157,10 +178,12 @@ impl Noise {
             match for_both!(internel_noise, internal_noise => internal_noise.write_message(&data, &mut self.working_buffer))
             {
                 Ok(len) => {
-                    let result = Ok((
+                    let result = Ok(RouteWeaverPacket {
+                        source: self.public_key,
                         pre_encryption_transformation,
-                        self.working_buffer[..len].to_vec(),
-                    ));
+                        destination,
+                        message: self.working_buffer[..len].to_vec(),
+                    });
 
                     // Clear out sensitive data
                     self.working_buffer.zeroize();
@@ -184,8 +207,8 @@ impl Noise {
         &mut self,
         packet: RouteWeaverPacket,
     ) -> Result<PeerToPeerMessage, RouteWeaverError> {
-        if self.is_their_turn() {
-            let internel_noise = self.internal_noise.as_mut().unwrap();
+        if self.is_their_turn(packet.source) {
+            let internal_noise = self.noise.get_mut(&packet.source).unwrap();
 
             // Reserve the buffer
             self.working_buffer.resize(SERIALIZED_PACKET_SIZE_MAX, 0);
@@ -194,7 +217,7 @@ impl Noise {
             self.working_buffer.fill(0);
 
             // Try decrypting normally
-            match for_both!(internel_noise, internal_noise => internal_noise.read_message(&packet.message, &mut self.working_buffer))
+            match for_both!(internal_noise, internal_noise => internal_noise.read_message(&packet.message, &mut self.working_buffer))
             {
                 // It worked so return
                 Ok(len) => {
@@ -215,28 +238,40 @@ impl Noise {
                     data.zeroize();
                     self.working_buffer.zeroize();
 
-                    if let Either::Left(noise) = internel_noise {
+                    if let Left(noise) = internal_noise {
                         // If the remote does not want to communicate correctly it may as well not communicate at all
                         if !matches!(message, PeerToPeerMessage::Handshake) {
                             log::warn!(
                                 "Remote is trying to handshake with incorrect message. Resetting tunnel"
                             );
-                            self.reset();
+                            self.reset(packet.source);
+                            return Err(RouteWeaverError::SuspiciousRemoteBehavior);
+                        }
+
                         // If the handshake is finished and everything looks right lets transition into transport mode
-                        } else if noise.is_handshake_finished() {
+                        if noise.is_handshake_finished() {
                             if noise
                                 .get_remote_static()
                                 .map(|key| PublicKey(key.try_into().unwrap()))
                                 != Some(packet.source)
                             {
+                                log::info!(
+                                    "{}",
+                                    noise
+                                        .get_remote_static()
+                                        .map(|key| PublicKey(key.try_into().unwrap()))
+                                        .unwrap()
+                                );
                                 log::warn!("A handshake completed but the remote public key didn't match the packets specified source. Resetting tunnel");
-                                self.reset();
+                                self.reset(packet.source);
                                 return Err(RouteWeaverError::SuspiciousRemoteBehavior);
                             }
                             log::info!("A handshake completed with remote {}", packet.source);
-                            let noise = self.internal_noise.take().unwrap();
-                            self.internal_noise =
-                                Some(Right(noise.unwrap_left().into_transport_mode()?));
+                            let noise = self.noise.remove(&packet.source).unwrap();
+                            self.noise.insert(
+                                packet.source,
+                                Right(noise.unwrap_left().into_transport_mode()?),
+                            );
                         }
 
                         return Ok(message);
@@ -283,7 +318,7 @@ impl Noise {
 
                 data.zeroize();
                 self.working_buffer.zeroize();
-                self.internal_noise = Some(Left(new_noise));
+                self.noise.insert(packet.source, Left(new_noise));
                 Ok(message)
             }
             Err(err) => Err(err.into()),
@@ -306,9 +341,9 @@ fn determine_best_prencryption_transformation_for_data(data: &[u8]) -> PreEncryp
     // FIXME: This logic is extremely stupid
     // https://stackoverflow.com/questions/46716095/minimum-file-size-for-compression-algorithms
 
-    if data.len() > 30 {
-        return PreEncryptionTransformation::Lz4;
+    if data.len() <= 30 {
+        return PreEncryptionTransformation::Plain;
     }
 
-    PreEncryptionTransformation::Plain
+    PreEncryptionTransformation::Lz4
 }

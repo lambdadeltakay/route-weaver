@@ -2,6 +2,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RouteWeaverError {
+    #[error("The author should be fixing this")]
+    IDontWannaRationalizeThisRightNow,
     #[error("Suspicious remote behavior")]
     SuspiciousRemoteBehavior,
     #[error("Handshake in established tunnel")]
@@ -15,7 +17,7 @@ pub enum RouteWeaverError {
     #[error("Failed to parse key")]
     KeyFailedToParse,
     #[error("Failed to parse packet")]
-    PacketDecodingError,
+    PacketManagingFailure,
     #[error("Failed to process message")]
     UnencryptedMessageProcessingError,
     #[error("Snow related error: {0}")]

@@ -1,16 +1,15 @@
 use route_weaver_common::{
     address::TransportAddress,
     error::RouteWeaverError,
-    transport::{Transport, TransportConnection},
+    transport::{
+        GenericBincodeConnectionReader, GenericBincodeConnectionWriter, Transport,
+        TransportConnectionReader, TransportConnectionWriter,
+    },
 };
-use std::{path::PathBuf, task::Poll};
-use std::{
-    pin::{pin, Pin},
-    sync::Arc,
-};
+use std::path::PathBuf;
+use std::{pin::Pin, sync::Arc};
 use tokio::{
     fs::remove_file,
-    io::{AsyncRead, AsyncWrite},
     net::{UnixListener, UnixStream},
 };
 
@@ -32,14 +31,20 @@ impl Transport for UnixTransport {
         })
     }
 
-    fn get_protocol_string() -> &'static str {
+    fn get_protocol_string(&self) -> &'static str {
         "unix"
     }
 
     async fn connect(
         &self,
         address: TransportAddress,
-    ) -> Result<Pin<Box<dyn TransportConnection>>, RouteWeaverError> {
+    ) -> Result<
+        (
+            Pin<Box<dyn TransportConnectionReader>>,
+            Pin<Box<dyn TransportConnectionWriter>>,
+        ),
+        RouteWeaverError,
+    > {
         let path = address
             .data
             .parse::<PathBuf>()
@@ -48,71 +53,51 @@ impl Transport for UnixTransport {
         UnixStream::connect(path)
             .await
             .map(|stream| {
-                Box::pin(UnixTransportConnection { stream }) as Pin<Box<dyn TransportConnection>>
+                let (read, write) = stream.into_split();
+
+                (
+                    GenericBincodeConnectionReader::new(read)
+                        as Pin<Box<dyn TransportConnectionReader>>,
+                    GenericBincodeConnectionWriter::new(write)
+                        as Pin<Box<dyn TransportConnectionWriter>>,
+                )
             })
             .map_err(RouteWeaverError::Custom)
     }
 
     async fn accept(
         &self,
-    ) -> Result<(Pin<Box<dyn TransportConnection>>, Option<TransportAddress>), RouteWeaverError>
-    {
+    ) -> Result<
+        (
+            (
+                Pin<Box<dyn TransportConnectionReader>>,
+                Pin<Box<dyn TransportConnectionWriter>>,
+            ),
+            Option<TransportAddress>,
+        ),
+        RouteWeaverError,
+    > {
         self.socket
             .accept()
             .await
             .map(|(stream, addr)| {
+                let (read, write) = stream.into_split();
+
                 (
-                    Box::pin(UnixTransportConnection { stream })
-                        as Pin<Box<dyn TransportConnection>>,
+                    (
+                        GenericBincodeConnectionReader::new(read)
+                            as Pin<Box<dyn TransportConnectionReader>>,
+                        GenericBincodeConnectionWriter::new(write)
+                            as Pin<Box<dyn TransportConnectionWriter>>,
+                    ),
                     addr.as_pathname().map(|path| TransportAddress {
-                        address_type: "unix".into(),
-                        protocol: "unix".into(),
-                        data: path.to_string_lossy().into_owned(),
+                        address_type: "unix".try_into().unwrap(),
+                        protocol: "unix".try_into().unwrap(),
+                        data: path.to_string_lossy().as_ref().try_into().unwrap(),
                         port: None,
                     }),
                 )
             })
             .map_err(RouteWeaverError::Custom)
-    }
-}
-
-#[derive(Debug)]
-pub struct UnixTransportConnection {
-    stream: UnixStream,
-}
-
-impl TransportConnection for UnixTransportConnection {}
-
-impl AsyncRead for UnixTransportConnection {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        pin!(&mut self.stream).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for UnixTransportConnection {
-    fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        pin!(&mut self.stream).poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        pin!(&mut self.stream).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        pin!(&mut self.stream).poll_shutdown(cx)
     }
 }

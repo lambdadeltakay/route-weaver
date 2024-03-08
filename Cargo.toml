@@ -10,5 +10,7 @@ tower = { version = "0.4", features = ["full"] }
 tokio-tower = "0.6"
 serde_with = "3.6"
 zeroize = { version = "1.7", features = ["derive"] }
+arrayvec = { version = "0.7", features = ["serde", "zeroize"] }
+sha2 = "0.10"
 # For several reasons we don't use this for anything but interdaemon communication
 async-bincode = "0.7"
