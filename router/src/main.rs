@@ -1,4 +1,3 @@
-mod gateway;
 mod message_socket;
 mod noise;
 mod p2p;
@@ -14,7 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
 use std::{collections::HashSet, path::PathBuf, time::Duration};
-use tokio::{fs::read_to_string, time::sleep};
+use tokio::{
+    fs::{read_to_string, remove_file},
+    net::UnixListener,
+    time::sleep,
+};
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
@@ -44,7 +47,7 @@ async fn main() {
         .build(
             log4rs::config::Root::builder()
                 .appender("console")
-                .build(LevelFilter::Warn),
+                .build(LevelFilter::Info),
         )
         .unwrap();
 
@@ -85,44 +88,13 @@ async fn main() {
 
     sleep(Duration::from_secs(1000)).await;
 
-    /*
-
     let tmpdir = std::env::temp_dir();
     let socket_path = tmpdir.join(env!("CARGO_CRATE_NAME"));
     let _ = remove_file(socket_path.clone()).await;
     let socket = UnixListener::bind(socket_path).unwrap();
 
-    loop {
+    while let Ok((stream, _)) = socket.accept().await {
         let router = router.clone();
-
-        if let Ok((stream, _)) = socket.accept().await {
-            tokio::spawn(async move {
-                let service = ServiceBuilder::new()
-                    .buffer(10)
-                    .service_fn(move |from_client| {
-                        let router = router.clone();
-                        async move {
-                            router
-                                .send_message(config.public_key, PeerToPeerMessage::Handshake)
-                                .await;
-
-                            anyhow::Ok(ClientBoundMessage::ApplicationRegistered {
-                                application_id: "ping".into(),
-                            })
-                        }
-                    });
-
-                let bincode =
-                    AsyncBincodeStream::<_, RouterBoundMessage, ClientBoundMessage, _>::from(
-                        stream,
-                    )
-                    .for_async();
-
-                let server = Server::new(bincode, service);
-
-                server.await
-            });
-        }
+        tokio::spawn(async move {});
     }
-             */
 }

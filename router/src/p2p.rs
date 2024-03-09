@@ -21,13 +21,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::mpsc, time::interval};
-use tokio::{
-    sync::{
-        mpsc::{Receiver, Sender},
-        RwLock,
-    },
-    time::timeout,
-};
+use tokio::{sync::RwLock, time::timeout};
 use tokio_stream::StreamExt;
 
 #[derive(Default)]
@@ -128,8 +122,8 @@ impl P2PCommunicatorBuilder {
 }
 
 pub struct RouteWeaverSocketHandle {
-    to_socket: Sender<Vec<u8>>,
-    from_socket: Receiver<Vec<u8>>,
+    to_socket: mpsc::Sender<Vec<u8>>,
+    from_socket: mpsc::Receiver<Vec<u8>>,
 }
 
 pub struct RouteWeaverTransport {
@@ -137,7 +131,7 @@ pub struct RouteWeaverTransport {
     transports: HashMap<&'static str, Arc<dyn Transport>>,
     known_gateways: RwLock<Box<StaticRb<TransportAddress, 100>>>,
     writers: DashMap<TransportAddress, mpsc::Sender<RouteWeaverPacket>>,
-    listeners: DashMap<ApplicationId, DashMap<PublicKey, RouteWeaverSocketHandle>>,
+    listeners: DashMap<(PublicKey, ApplicationId), RouteWeaverSocketHandle>,
     connection_tracker: DashSet<TransportAddress>,
 }
 
@@ -182,14 +176,19 @@ impl RouteWeaverTransport {
         packet_router_pipe: mpsc::Sender<RouteWeaverPacket>,
     ) {
         loop {
+            if !self.writers.contains_key(&address) {
+                break;
+            }
+
             if let Some(packet) = writer_pipe.recv().await {
                 match writer.send(packet.clone()).await {
                     Ok(_) => {
                         log::trace!("Sent packet to: {}", address);
                     }
                     Err(err) => {
-                        log::error!("Error writing to transport: {}", err);
+                        log::error!("Error writing to transport: {}, sending for rerouting", err);
                         packet_router_pipe.send(packet).await.unwrap();
+                        self.writers.remove(&address);
                         break;
                     }
                 }
@@ -213,7 +212,8 @@ impl RouteWeaverTransport {
                         transport_packet_pipe.send(packet).await.unwrap();
                     }
                     Err(err) => {
-                        log::error!("Error reading from transport: {}, inputting packet again for rerouting", err);
+                        log::error!("Error reading from transport: {}", err);
+                        self.writers.remove(&address);
                         break;
                     }
                 }
@@ -369,8 +369,12 @@ impl RouteWeaverTransport {
                                 .unwrap();
                             packet_router_pipe.send(packet).await.unwrap();
                         } else {
-                            let response = PeerToPeerMessage::ApplicationDataOk { id };
+                            let listener =
+                                self.listeners.get_mut(&(public_key, id.clone())).unwrap();
+
                             for application_data in state.counts {}
+
+                            let response = PeerToPeerMessage::ApplicationDataOk { id };
                         }
                     } else {
                         log::warn!("Received EndApplicationData without StartApplicationData");
@@ -396,6 +400,18 @@ impl RouteWeaverTransport {
     ) {
         loop {
             if let Some(packet) = transport_packet_pipe.recv().await {
+                log::info!("Found a packet");
+                log::info!(
+                    "This packet claims to be from {} and going to {}",
+                    packet.source,
+                    packet.destination
+                );
+                log::info!(
+                    "The message is {} bytes long and claims to have pre encryption transformation {:?}", 
+                    packet.message.len(),
+                    packet.pre_encryption_transformation
+                );
+
                 let mut noise_lock = self.noise.write().await;
 
                 if packet.message.is_empty() {

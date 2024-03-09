@@ -20,6 +20,8 @@ pub enum RouteWeaverError {
     PacketManagingFailure,
     #[error("Failed to process message")]
     UnencryptedMessageProcessingError,
+    #[error("Postcard related error: {0}")]
+    PostcardRelatedError(#[from] postcard::Error),
     #[error("Snow related error: {0}")]
     SnowRelatedError(#[from] snow::Error),
     #[error("Unknown error: {0}")]

@@ -80,28 +80,28 @@ impl<T: AsyncWrite + Debug + Send + Sync> Sink<RouteWeaverPacket>
     type Error = RouteWeaverError;
 
     fn poll_ready(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.get_mut().writer).poll_ready(cx)
+        Pin::new(&mut self.writer).poll_ready(cx)
     }
 
-    fn start_send(self: Pin<&mut Self>, item: RouteWeaverPacket) -> Result<(), Self::Error> {
-        Pin::new(&mut self.get_mut().writer).start_send(item)
+    fn start_send(mut self: Pin<&mut Self>, item: RouteWeaverPacket) -> Result<(), Self::Error> {
+        Pin::new(&mut self.writer).start_send(item)
     }
 
     fn poll_flush(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.get_mut().writer).poll_flush(cx)
+        Pin::new(&mut self.writer).poll_flush(cx)
     }
 
     fn poll_close(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.get_mut().writer).poll_close(cx)
+        Pin::new(&mut self.writer).poll_close(cx)
     }
 }
 

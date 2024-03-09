@@ -4,7 +4,6 @@ use std::{
 };
 
 use arrayvec::ArrayVec;
-use bincode::Options;
 use once_cell::sync::Lazy;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio_util::{
@@ -17,49 +16,19 @@ use crate::{
     address::TransportAddress, error::RouteWeaverError, noise::PublicKey, router::ApplicationId,
 };
 
-// Rust doesn't have autotyping for statics moment
-#[allow(clippy::type_complexity)]
-pub static BINCODE_CONFIG: Lazy<
-    bincode::config::WithOtherLimit<
-        bincode::config::WithOtherIntEncoding<
-            bincode::config::WithOtherEndian<
-                bincode::config::WithOtherTrailing<
-                    bincode::DefaultOptions,
-                    bincode::config::AllowTrailing,
-                >,
-                bincode::config::BigEndian,
-            >,
-            bincode::config::VarintEncoding,
-        >,
-        bincode::config::Bounded,
-    >,
-> = Lazy::new(|| {
-    bincode::DefaultOptions::default()
-        .allow_trailing_bytes()
-        .with_big_endian()
-        .with_varint_encoding()
-        .with_limit(SERIALIZED_PACKET_SIZE_MAX as u64)
-});
-
 #[inline]
-pub fn wire_encode<T: Serialize>(
-    buffer: &mut Vec<u8>,
-    to_encode: &T,
-) -> Result<usize, bincode::Error> {
-    let len = wire_measure_size(to_encode)?;
-    buffer.reserve(len.saturating_sub(buffer.len()));
-    BINCODE_CONFIG.serialize_into(buffer, to_encode)?;
-    Ok(len)
+pub fn wire_encode<T: Serialize>(to_encode: &T) -> Result<Vec<u8>, postcard::Error> {
+    postcard::to_stdvec(to_encode)
 }
 
 #[inline]
-pub fn wire_decode<T: DeserializeOwned>(to_decode: &[u8]) -> Result<T, bincode::Error> {
-    BINCODE_CONFIG.deserialize(to_decode)
+pub fn wire_decode<T: DeserializeOwned>(to_decode: &[u8]) -> Result<T, postcard::Error> {
+    postcard::from_bytes(to_decode)
 }
 
 #[inline]
-pub fn wire_measure_size<T: Serialize>(to_encode: &T) -> Result<usize, bincode::Error> {
-    Ok(BINCODE_CONFIG.serialized_size(to_encode)? as usize)
+pub fn wire_measure_size<T: Serialize>(to_measure: &T) -> Result<usize, postcard::Error> {
+    Ok(wire_encode(to_measure)?.len())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -117,19 +86,17 @@ pub struct RouteWeaverPacket {
     pub source: PublicKey,
     pub destination: PublicKey,
     pub pre_encryption_transformation: PreEncryptionTransformation,
-    pub message: Vec<u8>,
+    pub message: Box<ArrayVec<u8, MAX_NOISE_MESSAGE_LENGTH>>,
 }
 
 // We allow a little padding to try to account for if the message is compressed
-pub const MAX_NOISE_MESSAGE_LENGTH: usize = u16::MAX as usize - 128;
+pub const MAX_NOISE_MESSAGE_LENGTH: usize = u16::MAX as usize - 72;
 
 /// I have no clue how noise actually looks like in binary format so we will do this
 pub const SERIALIZED_PACKET_SIZE_MAX: usize = (size_of::<PublicKey>() * 2) + u16::MAX as usize * 2;
 
 #[derive(Default, Debug, ZeroizeOnDrop)]
-pub struct PacketEncoderDecoder {
-    working_buffer: Vec<u8>,
-}
+pub struct PacketEncoderDecoder;
 
 impl Decoder for PacketEncoderDecoder {
     type Item = RouteWeaverPacket;
@@ -155,25 +122,13 @@ impl Decoder for PacketEncoderDecoder {
                     .map_err(|_| RouteWeaverError::PacketManagingFailure)?;
                 src.advance(size);
 
-                log::trace!("Found a packet of size {}", size);
-                log::trace!(
-                    "This packet claims to be from {} and going to {}",
-                    packet.source,
-                    packet.destination
-                );
-                log::trace!(
-                    "The message is {} bytes long and claims to have pre encryption transformation {:?}", 
-                    packet.message.len(),
-                    packet.pre_encryption_transformation
-                );
-
                 Ok(Some(packet))
             }
             Err(_) => {
                 if src.len() > SERIALIZED_PACKET_SIZE_MAX {
-                    log::error!("Current buffer is too large to be a packet");
+                    src.advance(SERIALIZED_PACKET_SIZE_MAX);
 
-                    Err(RouteWeaverError::PacketManagingFailure)
+                    Ok(None)
                 } else {
                     // Packet could be valid but it just hasn't had enough coming in to be deserializable yet
                     Ok(None)
@@ -191,10 +146,7 @@ impl Encoder<RouteWeaverPacket> for PacketEncoderDecoder {
         item: RouteWeaverPacket,
         dst: &mut tokio_util::bytes::BytesMut,
     ) -> Result<(), Self::Error> {
-        self.working_buffer.fill(0);
-        let len =
-            wire_encode(&mut self.working_buffer, &item).expect("Packet encoding should not fail");
-        dst.extend_from_slice(&self.working_buffer[..len]);
+        dst.extend_from_slice(&wire_encode(&item)?);
 
         Ok(())
     }

@@ -1,3 +1,4 @@
+use arrayvec::ArrayVec;
 use either::{
     for_both,
     Either::{self, Left, Right},
@@ -120,40 +121,37 @@ impl Noise {
         }
 
         if self.is_my_turn(destination) {
-            let internel_noise = self.noise.get_mut(&destination).unwrap();
+            let internal_noise = self.noise.get_mut(&destination).unwrap();
 
             // Clear buffer
             self.working_buffer.fill(0);
 
             // Encode our message and extract it from the buffer
-            let len = wire_encode(&mut self.working_buffer, &message).map_err(|_| {
+            let data = wire_encode(&message).map_err(|_| {
                 self.working_buffer.zeroize();
                 RouteWeaverError::UnencryptedMessageProcessingError
             })?;
 
             let pre_encryption_transformation =
-                determine_best_prencryption_transformation_for_data(&self.working_buffer[..len]);
+                determine_best_prencryption_transformation_for_data(&data);
 
             let mut data = match pre_encryption_transformation {
-                PreEncryptionTransformation::Plain => &self.working_buffer[..len],
+                PreEncryptionTransformation::Plain => data,
                 // With Lz4 we have to prepend the size ourself
                 PreEncryptionTransformation::Lz4 => {
                     let length_encoding_size = size_of::<u32>();
-
-                    // Extract our data
-                    let data = self.working_buffer[..len].to_vec();
 
                     // Clear our buffer again
                     self.working_buffer.fill(0);
 
                     // Reserve the buffer for whats coming next
                     self.working_buffer.resize(
-                        length_encoding_size + lz4_flex::block::get_maximum_output_size(len),
+                        length_encoding_size + lz4_flex::block::get_maximum_output_size(data.len()),
                         0,
                     );
 
                     // Compress into our buffer and release that
-                    lz4_flex::block::compress_into(
+                    let len = lz4_flex::block::compress_into(
                         &data,
                         &mut self.working_buffer[length_encoding_size..],
                     )
@@ -161,9 +159,9 @@ impl Noise {
 
                     // Copy in the length encoding
                     self.working_buffer[..length_encoding_size]
-                        .copy_from_slice(&(len as u32).to_le_bytes());
+                        .copy_from_slice(&(data.len() as u32).to_le_bytes());
 
-                    &self.working_buffer[..len]
+                    self.working_buffer[..len].to_vec()
                 }
             }
             .to_vec();
@@ -175,14 +173,17 @@ impl Noise {
             self.working_buffer.resize(SERIALIZED_PACKET_SIZE_MAX, 0);
 
             // Return the data finally
-            match for_both!(internel_noise, internal_noise => internal_noise.write_message(&data, &mut self.working_buffer))
+            match for_both!(internal_noise, internal_noise => internal_noise.write_message(&data, &mut self.working_buffer))
             {
                 Ok(len) => {
                     let result = Ok(RouteWeaverPacket {
                         source: self.public_key,
                         pre_encryption_transformation,
                         destination,
-                        message: self.working_buffer[..len].to_vec(),
+                        message: Box::new(self.working_buffer[..len].try_into().map_err(|_| {
+                            self.working_buffer.zeroize();
+                            RouteWeaverError::UnencryptedMessageProcessingError
+                        })?),
                     });
 
                     // Clear out sensitive data
